@@ -1,0 +1,41 @@
+APK path: build/outputs/apk/release/laimanhua-mihon-release.apk
+Size: 618885 bytes
+---- manifest (aapt) ----
+N: android=http://schemas.android.com/apk/res/android (line=2)
+  E: manifest (line=2)
+    A: http://schemas.android.com/apk/res/android:versionCode(0x0101021b)=1
+    A: http://schemas.android.com/apk/res/android:versionName(0x0101021c)="1.4.1" (Raw: "1.4.1")
+    A: http://schemas.android.com/apk/res/android:compileSdkVersion(0x01010572)=34
+    A: http://schemas.android.com/apk/res/android:compileSdkVersionCodename(0x01010573)="14" (Raw: "14")
+    A: package="eu.kanade.tachiyomi.extension.zh.laimanhua" (Raw: "eu.kanade.tachiyomi.extension.zh.laimanhua")
+    A: platformBuildVersionCode=34
+    A: platformBuildVersionName=14
+      E: uses-sdk (line=7)
+        A: http://schemas.android.com/apk/res/android:minSdkVersion(0x0101020c)=21
+        A: http://schemas.android.com/apk/res/android:targetSdkVersion(0x01010270)=34
+      E: application (line=12)
+        A: http://schemas.android.com/apk/res/android:extractNativeLibs(0x010104ea)=true
+          E: meta-data (line=13)
+            A: http://schemas.android.com/apk/res/android:name(0x01010003)="tachiyomi.extension.class" (Raw: "tachiyomi.extension.class")
+            A: http://schemas.android.com/apk/res/android:value(0x01010024)="eu.kanade.tachiyomi.extension.zh.laimanhua.LaiManHuaFactory" (Raw: "eu.kanade.tachiyomi.extension.zh.laimanhua.LaiManHuaFactory")
+---- dex classes ----
+Archive:  build/outputs/apk/release/laimanhua-mihon-release.apk
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+       56  1981-01-01 01:01   META-INF/com/android/build/gradle/app-metadata.properties
+  2024204  1981-01-01 01:01   classes.dex
+      624  1981-01-01 01:01   kotlin-tooling-metadata.json
+      928  1981-01-01 01:01   kotlin/annotation/annotation.kotlin_builtins
+     3685  1981-01-01 01:01   kotlin/collections/collections.kotlin_builtins
+      200  1981-01-01 01:01   kotlin/coroutines/coroutines.kotlin_builtins
+      646  1981-01-01 01:01   kotlin/internal/internal.kotlin_builtins
+    18640  1981-01-01 01:01   kotlin/kotlin.kotlin_builtins
+     3399  1981-01-01 01:01   kotlin/ranges/ranges.kotlin_builtins
+     2426  1981-01-01 01:01   kotlin/reflect/reflect.kotlin_builtins
+     1576  1981-01-01 01:01   AndroidManifest.xml
+       40  1981-01-01 01:01   resources.arsc
+     1426  1981-01-01 01:01   META-INF/CERT.SF
+     1335  1981-01-01 01:01   META-INF/CERT.RSA
+     1352  1981-01-01 01:01   META-INF/MANIFEST.MF
+---------                     -------
+  2060537                     15 files
