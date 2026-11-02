@@ -205,41 +205,38 @@ class LaiManHua : ParsedHttpSource() {
 
     // ------------------------------------------- popular / latest / search
 
-    // [风险3] 侦察：独立热门页确实存在 —— /kanmanhua/zaixian_hit.html
-    // （title="漫画排行榜"，200，60971B）。
-    // 选择器 div.allTop li a.vtip 实测 225 条（15 个分类榜×15 条），
-    // 与最新页重合仅 31/205，首条不同，天然可区分。
-    // 顺位由 span.top_N 编码，无需额外排序。
-    override fun popularMangaRequest(page: Int) =
+    override fun popularMangaRequest(page: Int): Request =
         GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
 
-    override fun popularMangaSelector() = "div.allTop li a.vtip"
+    override fun popularMangaSelector(): String = "div.allTop li a.vtip"
 
-    override fun popularMangaFromElement(element: Element) = SManga.create().apply {
+    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
         url = baseUrl + element.attr("href") // 实测全为相对路径
         title = element.attr("title").trim() // 实测 225 条 title 全非空
     }
+    
     override fun popularMangaNextPageSelector(): String? = null
 
     // [风险3] latestUpdates 保持原样，未改动
-    override fun latestUpdatesRequest(page: Int) =
+    override fun latestUpdatesRequest(page: Int): Request =
         GET("$baseUrl/kanmanhua/zaixian_recent.html", siteHeaders)
 
-    override fun latestUpdatesSelector() = "div.updateList li a.video"
+    override fun latestUpdatesSelector(): String = "div.updateList li a.video"
 
-    override fun latestUpdatesFromElement(element: Element) = SManga.create().apply {
+    override fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
         url = baseUrl + element.attr("href")
         title = element.text().trim()
     }
+    
     override fun latestUpdatesNextPageSelector(): String? = null
 
     // [风险4] 搜索入口实测均不可用：/cse/search/ → 404；/cse1/search/ POST → 405。
-    // 改为显式报错，避免"搜任何词都返回最新列表"误导用户。不编造选择器。
     override fun searchMangaRequest(page: Int, query: String, filters: Any): Request =
         throw Exception("该图源暂不支持搜索")
 
-    // 防线：正常流程不会走到（request 已抛错），仅满足抽象类约束
-    override fun searchMangaSelector() = "div.__no_search__"
-    override fun searchMangaFromElement(element: Element) = SManga.create()
+    override fun searchMangaSelector(): String = "div.__no_search__"
+    
+    override fun searchMangaFromElement(element: Element): SManga = SManga.create()
+    
     override fun searchMangaNextPageSelector(): String? = null
 }
