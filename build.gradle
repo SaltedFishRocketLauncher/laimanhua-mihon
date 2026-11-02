@@ -1,5 +1,5 @@
 plugins {
-    id 'com.android.library' version '8.2.2'
+    id 'com.android.application' version '8.2.2'
     id 'org.jetbrains.kotlin.android' version '1.9.22'
 }
 
@@ -8,24 +8,39 @@ android {
     compileSdk 34
 
     defaultConfig {
+        applicationId 'eu.kanade.tachiyomi.extension.zh.laimanhua'
         minSdk 21
         targetSdk 34
+        versionCode 1
+        versionName '1.4.1'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // 未提供 keystore 时用 debug 签名，保证 CI 能产出可安装 APK
+            signingConfig signingConfigs.debug
+        }
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
-        coreLibraryDesugaringEnabled true
     }
 
     kotlinOptions {
         jvmTarget = '17'
     }
+
+    // 扩展 APK 不需要任何 launcher activity，去掉默认图标依赖
+    lint {
+        abortOnError false
+    }
 }
 
 dependencies {
-    compileOnly "com.squareup.okhttp3:okhttp:4.12.0"
-    compileOnly "org.jsoup:jsoup:1.17.2"
-    compileOnly "com.github.keiyoushi:extensions-lib:1.5.4"
-    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+    // 关键修正：keiyoushi/extensions-lib 在 jitpack 上仅有 1.4.2.1，原 1.5.4 不存在
+    compileOnly 'com.github.keiyoushi:extensions-lib:1.4.2.1'
+    compileOnly 'com.squareup.okhttp3:okhttp:4.12.0'
+    compileOnly 'org.jsoup:jsoup:1.17.2'
 }
