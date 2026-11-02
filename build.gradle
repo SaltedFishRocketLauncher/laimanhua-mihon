@@ -1,0 +1,29 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'eu.kanade.tachiyomi.extension.zh.laimanhua'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 21
+        targetSdk 34
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    compileOnly "com.squareup.okhttp3:okhttp:4.12.0"
+    compileOnly "org.jsoup:jsoup:1.17.2"
+    compileOnly "com.github.mihonapp:extensions-lib:1.5"
+}
