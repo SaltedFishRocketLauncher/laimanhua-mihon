@@ -22,11 +22,13 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Generate Gradle Wrapper
+      - name: Setup Gradle 8.2
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.2
-          generate-wrapper: true
+
+      - name: Generate Gradle Wrapper
+        run: gradle wrapper --gradle-version 8.2
 
       - name: Build APK
         run: ./gradlew assembleRelease
