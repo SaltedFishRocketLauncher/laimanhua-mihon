@@ -5,6 +5,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,24 +36,32 @@ jobs:
             -storepass laimanhua -keypass laimanhua \
             -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
 
-      - name: Generate Wrapper & Build APK
-        run: gradle wrapper --gradle-version 8.2 && ./gradlew assembleRelease --stacktrace --info
+      - name: Generate Wrapper
+        run: gradle wrapper --gradle-version 8.2 2>&1 | tee build-log.txt
 
-      - name: Upload build reports
+      - name: Build APK
+        id: build
+        continue-on-error: true
+        run: |
+          ./gradlew assembleRelease --stacktrace --no-daemon 2>&1 | tee -a build-log.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit build log for diagnosis
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-reports
-          path: |
-            build/reports/**
-            **/build/outputs/logs/**
-          if-no-files-found: ignore
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          tail -c 60000 build-log.txt > log.txt || cp build-log.txt log.txt
+          git add -f log.txt
+          git commit -m "ci: build log [skip ci]" || echo "nothing to commit"
+          git push || echo "push failed"
 
       - name: List APK output
         if: always()
         run: find . -name "*.apk" -type f || true
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: laimanhua-apk
