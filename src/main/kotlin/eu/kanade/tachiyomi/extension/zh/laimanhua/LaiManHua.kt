@@ -136,6 +136,10 @@ class LaiManHua : ParsedHttpSource() {
         }
     }
 
+    // 修正：ParsedHttpSource 还要求实现 imageUrlParse(Document)（与 imageUrlParse(Response) 重载）
+    // 本图源的图片地址全部由 pageListParse 一次给出，故此处返回空串表示"无需二次解析"。
+    override fun imageUrlParse(document: Document): String = ""
+
     /**
      * [风险1] 单次探测选主机。
      * 关键：必须带章节页 Referer —— 无 Referer 的 HEAD 实测返回 404，
