@@ -24,8 +24,27 @@ jobs:
         with:
           gradle-version: '8.2'
 
+      - name: Generate signing keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore laimanhua.keystore \
+            -alias laimanhua \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass laimanhua -keypass laimanhua \
+            -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
+
       - name: Generate Wrapper & Build APK
-        run: gradle wrapper --gradle-version 8.2 && ./gradlew assembleRelease --stacktrace
+        run: gradle wrapper --gradle-version 8.2 && ./gradlew assembleRelease --stacktrace --info
+
+      - name: Upload build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            build/reports/**
+            **/build/outputs/logs/**
+          if-no-files-found: ignore
 
       - name: List APK output
         if: always()

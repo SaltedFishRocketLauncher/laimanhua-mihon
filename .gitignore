@@ -1,0 +1,6 @@
+laimanhua.keystore
+*.keystore
+build/
+.gradle/
+.idea/
+local.properties

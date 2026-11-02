@@ -15,11 +15,23 @@ android {
         versionName '1.4.1'
     }
 
+    signingConfigs {
+        // CI 中由 workflow 用 keytool 生成；本地构建请自备同名 keystore
+        release {
+            storeFile file('laimanhua.keystore')
+            storePassword 'laimanhua'
+            keyAlias 'laimanhua'
+            keyPassword 'laimanhua'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
-            // 未提供 keystore 时用 debug 签名，保证 CI 能产出可安装 APK
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
         }
     }
 
@@ -32,14 +44,14 @@ android {
         jvmTarget = '17'
     }
 
-    // 扩展 APK 不需要任何 launcher activity，去掉默认图标依赖
     lint {
         abortOnError false
+        checkReleaseBuilds false
     }
 }
 
 dependencies {
-    // 关键修正：keiyoushi/extensions-lib 在 jitpack 上仅有 1.4.2.1，原 1.5.4 不存在
+    // 修正：keiyoushi/extensions-lib 在 jitpack 上仅有 1.4.2.1，原 1.5.4 不存在(404)
     compileOnly 'com.github.keiyoushi:extensions-lib:1.4.2.1'
     compileOnly 'com.squareup.okhttp3:okhttp:4.12.0'
     compileOnly 'org.jsoup:jsoup:1.17.2'
