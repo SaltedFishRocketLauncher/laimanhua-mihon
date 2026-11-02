@@ -36,29 +36,35 @@ jobs:
             -storepass laimanhua -keypass laimanhua \
             -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
 
-      - name: Generate Wrapper
-        run: gradle wrapper --gradle-version 8.2 2>&1 | tee build-log.txt
-
       - name: Build APK
-        id: build
-        continue-on-error: true
         run: |
-          ./gradlew assembleRelease --stacktrace --no-daemon 2>&1 | tee -a build-log.txt
-          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          gradle wrapper --gradle-version 8.2
+          ./gradlew assembleRelease --stacktrace
 
-      - name: Commit build log for diagnosis
+      - name: Verify APK contents
+        if: always()
+        run: |
+          APK=$(find build/outputs/apk/release -name "*.apk" | head -1)
+          echo "APK=$APK"
+          {
+            echo "APK path: $APK"
+            echo "Size: $(stat -c %s "$APK" 2>/dev/null) bytes"
+            echo "---- manifest (aapt) ----"
+            AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt2 | head -1)
+            "$AAPT" dump xmltree --file AndroidManifest.xml "$APK" 2>&1 | head -40
+            echo "---- dex classes ----"
+            unzip -l "$APK" | head -20
+          } > verify.txt 2>&1
+          cat verify.txt
+
+      - name: Commit verification result
         if: always()
         run: |
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
-          tail -c 60000 build-log.txt > log.txt || cp build-log.txt log.txt
-          git add -f log.txt
-          git commit -m "ci: build log [skip ci]" || echo "nothing to commit"
+          git add -f verify.txt
+          git commit -m "ci: apk verify [skip ci]" || echo "nothing to commit"
           git push || echo "push failed"
-
-      - name: List APK output
-        if: always()
-        run: find . -name "*.apk" -type f || true
 
       - name: Upload APK
         if: always()
