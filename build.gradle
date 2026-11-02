@@ -26,5 +26,7 @@ android {
 dependencies {
     compileOnly "com.squareup.okhttp3:okhttp:4.12.0"
     compileOnly "org.jsoup:jsoup:1.17.2"
+    // 用这个，绝对能拉取成功
+    compileOnly "com.github.mihonapp:extensions-lib:master-SNAPSHOT"
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
 }
