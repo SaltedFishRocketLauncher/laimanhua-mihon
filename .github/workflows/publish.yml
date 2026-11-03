@@ -54,10 +54,10 @@ jobs:
             echo "使用 Secrets 中的 keystore"
             exit 0
           fi
-          git fetch origin "$REPO_BRANCH" --depth 1 || true
-          if git show "origin/$REPO_BRANCH:signing/laimanhua.keystore" > laimanhua.keystore 2>/dev/null; then
+          if git fetch origin "$REPO_BRANCH" --depth 1 2>/dev/null &&              git show "origin/$REPO_BRANCH:signing/laimanhua.keystore" > laimanhua.keystore 2>/dev/null &&              [ -s laimanhua.keystore ]; then
             echo "复用 repo 分支已存档的 keystore"
           else
+            rm -f laimanhua.keystore
             keytool -genkeypair -v -keystore laimanhua.keystore -alias laimanhua -keyalg RSA -keysize 2048 -validity 10000 -storepass laimanhua -keypass laimanhua -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
             echo "首次生成 keystore，将随索引存档到 repo 分支"
           fi
