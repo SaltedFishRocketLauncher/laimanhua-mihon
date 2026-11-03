@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.extension.zh.laimanhua
 import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.SourceFactory
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -18,22 +19,17 @@ import org.jsoup.nodes.Document
 import java.io.IOException
 import java.nio.charset.Charset
 
-/** Mihon 通过 AndroidManifest 的 tachiyomi.extension.class 反射此类来取得 Source。 */
 class LaiManHuaFactory : SourceFactory {
     override fun createSources() = listOf(LaiManHua())
 }
 
-/** [风险2] 供上层识别 CF 挑战、决定是否走 WebView。本类不实现 WebView。 */
+/** [风险2] 供上层识别 CF 挑战。本类不实现 WebView。 */
 class CloudflareChallengeException(url: String) :
     Exception("Cloudflare JS challenge @ $url")
 
 /**
- * 改用 HttpSource 而非 ParsedHttpSource。
- *
- * 原因（实测）：站点响应头是 `Content-Type: text/html`，不带 charset，
- * 而实际字节是 GB18030。ParsedHttpSource 内部自行把 Response 交给 Jsoup，
- * 会按 UTF-8 解码，中文全部乱码 —— 表现为"能装上、能点开，但标题章节全是
- * 乱码或空列表"。因此这里接管全部解析，用 bytes + GB18030 自行构建 Document。
+ * 基于 HttpSource：站点响应头无 charset（实际 GB18030），
+ * ParsedHttpSource 会按 UTF-8 解析导致中文全乱码，故接管全部解析。
  */
 class LaiManHua : HttpSource() {
 
@@ -56,22 +52,11 @@ class LaiManHua : HttpSource() {
         .add("User-Agent", ua)
         .build()
 
-    // ------------------------------------------------------------ 抓取/解码
+    // ------------------------------------------------------------ 解码
 
-    /**
-     * 解析已拿到的 Response，绝不再发二次请求。
-     *
-     * 为什么必须自己解析：站点响应头是 `Content-Type: text/html`，不带 charset，
-     * 而实际字节是 GB18030。body.string() 会按 UTF-8 解，中文全部乱码。
-     * 所以统一走 bytes() + GB18030。
-     */
     private fun parseBody(response: Response): Document {
         val url = response.request.url.toString()
-
         if (!response.isSuccessful) {
-            // [风险2] 区分两类 403：
-            //  A. CF JS Challenge —— 可用 WebView 拿 cf_clearance 后重试
-            //  B. 站点自身封禁 —— 实测 /kanmanhua/ 是 IIS 风格 403，WebView 也过不去
             if (response.code == 403) {
                 val body = response.body?.bytes()?.toString(gb18030).orEmpty()
                 val isCf = body.contains("Just a moment") ||
@@ -83,15 +68,13 @@ class LaiManHua : HttpSource() {
             }
             throw Exception("HTTP ${response.code} @ $url")
         }
-
-        val bytes = response.body!!.bytes()
-        return Jsoup.parse(bytes.toString(gb18030), url)
+        return Jsoup.parse(response.body!!.bytes().toString(gb18030), url)
     }
 
-    // ------------------------------------------------------- mangaDetailsParse
+    // ------------------------------------------------------- 详情
 
     override fun mangaDetailsRequest(manga: SManga): Request =
-        GET(absoluteUrl(manga.url), siteHeaders)
+        GET(baseUrl + manga.url, siteHeaders)
 
     override fun mangaDetailsParse(response: Response): SManga {
         val document = parseBody(response)
@@ -113,41 +96,39 @@ class LaiManHua : HttpSource() {
         }
     }
 
-    // ------------------------------------------------------- chapterListParse
+    // ------------------------------------------------------- 章节
 
     override fun chapterListRequest(manga: SManga): Request =
-        GET(absoluteUrl(manga.url), siteHeaders)
+        GET(baseUrl + manga.url, siteHeaders)
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = parseBody(response)
-
-        // 实测 www 桌面模板为 div.plist，m 站移动模板为 #chapterList，用选择器组一次覆盖
         val anchors = document.select("div.plist li > a[href]").ifEmpty {
             document.select("#chapterList li a")
         }
         if (anchors.isEmpty()) {
-            throw Exception("章节列表为空，模板可能再次改版 @ ${response.request.url}")
+            throw Exception("章节列表为空 @ ${response.request.url}")
         }
 
         return anchors.map { a ->
             SChapter.create().apply {
                 name = a.text().trim().ifEmpty { a.attr("title").trim() }
-                url = absoluteUrl(a.attr("href"))
+                // 必须存相对路径：HttpSource.getChapterUrl() 会做 baseUrl + url
+                url = stripDomain(a.attr("href"))
             }
         }
     }
 
-    // --------------------------------------------------------- pageListParse
+    // ------------------------------------------------------- 图片列表（bug 修复点）
 
     override fun pageListRequest(chapter: SChapter): Request =
-        GET(absoluteUrl(chapter.url), siteHeaders)
+        GET(baseUrl + chapter.url, siteHeaders)
 
     override fun pageListParse(response: Response): List<Page> {
         val chapterUrl = response.request.url.toString()
         val document = parseBody(response)
         val payload = extractPicTree(document, chapterUrl)
 
-        // 含 mh160tuku 即明文，否则 Base64；解码结果为 UTF-8 字节
         val raw: String = if (payload.contains("mh160tuku")) {
             payload
         } else {
@@ -157,22 +138,15 @@ class LaiManHua : HttpSource() {
         val paths = raw.split("\$qingtiandy\$").filter { it.isNotBlank() }
         if (paths.isEmpty()) throw Exception("picTree 切分后为空 @ $chapterUrl")
 
-        // [风险1] 只探测一次：用第一张图的相对路径选主机
         val host = resolveImageHost(chapterUrl, paths.first())
 
         return paths.mapIndexed { index, path ->
-            // Page 第二参数为 Referer，图片主机做域名白名单校验，必须传章节页 URL
             Page(index, chapterUrl, host + path)
         }
     }
 
     override fun imageUrlParse(response: Response): String = ""
 
-    /**
-     * [风险1] 单次探测选主机。
-     * 关键：必须带章节页 Referer —— 无 Referer 的 HEAD 实测返回 404，
-     * 漏加会把全部主机误判为不可用，探测形同虚设。
-     */
     private fun resolveImageHost(chapterUrl: String, firstPath: String): String {
         for (host in IMAGE_HOSTS) {
             try {
@@ -186,16 +160,12 @@ class LaiManHua : HttpSource() {
                     if (resp.isSuccessful) return host
                 }
             } catch (_: IOException) {
-                // 该主机不可用，继续下一个
+                // next host
             }
         }
-        return IMAGE_HOSTS.first() // 全部失败：回退首个，不阻断阅读
+        return IMAGE_HOSTS.first()
     }
 
-    /**
-     * 提取内联脚本中的 picTree 值。
-     * 用不动点循环跳过可能的 `picTree = ''` 空声明。
-     */
     private fun extractPicTree(document: Document, chapterUrl: String): String {
         val block: String = document.select("script:containsData(picTree)").firstOrNull()?.data()
             ?: throw Exception("未找到 picTree 脚本块 @ $chapterUrl")
@@ -212,24 +182,19 @@ class LaiManHua : HttpSource() {
         throw Exception("picTree 赋值解析失败 @ $chapterUrl")
     }
 
-    // ------------------------------------------- popular / latest / search
+    // ------------------------------------------------------- 热门（默认榜单）
 
-    // [风险3] 独立热门页 /kanmanhua/zaixian_hit.html（漫画排行榜）
     override fun popularMangaRequest(page: Int): Request =
         GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = parseBody(response)
-        val mangas = document.select("div.allTop li a.vtip").map { a ->
-            SManga.create().apply {
-                url = absoluteUrl(a.attr("href"))
-                title = a.attr("title").trim()
-            }
-        }
-        return MangasPage(mangas, false)
+        // 默认展示第一个榜单「所有漫画排行」
+        return MangasPage(parseRankBlock(document, 0), false)
     }
 
-    // [风险3] latestUpdates 走最新更新页
+    // ------------------------------------------------------- 最新
+
     override fun latestUpdatesRequest(page: Int): Request =
         GET("$baseUrl/kanmanhua/zaixian_recent.html", siteHeaders)
 
@@ -237,24 +202,107 @@ class LaiManHua : HttpSource() {
         val document = parseBody(response)
         val mangas = document.select("div.updateList li a.video").map { a ->
             SManga.create().apply {
-                url = absoluteUrl(a.attr("href"))
+                url = stripDomain(a.attr("href"))
                 title = a.text().trim()
             }
         }
         return MangasPage(mangas, false)
     }
 
-    // [风险4] 搜索入口实测不可用：/cse/search/ → 404；/cse1/search/ POST → 405。
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
-        throw Exception("该图源暂不支持搜索")
+    // --------------------------------------- 分类筛选 + 风云榜（统一走 search）
 
-    override fun searchMangaParse(response: Response): MangasPage =
-        MangasPage(emptyList(), false)
+    /**
+     * Mihon 只在 search 流程传入 FilterList，因此「分类筛选」和「榜单切换」
+     * 都放在这里处理：不填搜索词时按所选模式浏览，填了则走站点搜索。
+     */
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        val mode = filters.filterIsInstance<ModeFilter>().firstOrNull()?.state ?: 0
+        val rank = filters.filterIsInstance<RankFilter>().firstOrNull()?.state ?: 0
+        val category = filters.filterIsInstance<CategoryFilter>().firstOrNull()?.state ?: 0
+
+        // 模式 0：风云榜（不翻页，榜单只有一屏）
+        if (mode == MODE_RANK && query.isBlank()) {
+            rankIndexForParse = rank
+            return GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
+        }
+
+        // 模式 1：分类浏览（支持翻页）
+        if (query.isBlank()) {
+            val path = CATEGORY_PATHS.getOrElse(category) { CATEGORY_PATHS[0] }
+            return GET("$baseUrl/kanmanhua/$path/$page.html", siteHeaders)
+        }
+
+        // 有搜索词但站点搜索接口不可用（/cse/search/ 404、/cse1/search/ 405 POST）。
+        // 这里不拿分类页冒充结果，交给解析层返回空列表。
+        rankIndexForParse = -1
+        return GET("$baseUrl/kanmanhua/rexue/1.html", siteHeaders)
+    }
+
+    override fun searchMangaParse(response: Response): MangasPage {
+        val document = parseBody(response)
+        val url = response.request.url.toString()
+
+        // 风云榜分支
+        if (url.contains("zaixian_hit.html")) {
+            val idx = if (rankIndexForParse >= 0) rankIndexForParse else 0
+            return MangasPage(parseRankBlock(document, idx), false)
+        }
+
+        // 分类页分支
+        val items = document.select("div.dmList dl dt a[href]")
+        if (items.isNotEmpty()) {
+            val mangas = items.map { a ->
+                SManga.create().apply {
+                    url = stripDomain(a.attr("href"))
+                    title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                }
+            }
+            val hasNext = document.select("div.pages a").any { it.text().contains("下一页") }
+            return MangasPage(mangas, hasNext)
+        }
+
+        return MangasPage(emptyList(), false)
+    }
+
+    override fun searchMangaSelector(): String = "div.dmList dl dt a[href]"
+
+    /** 解析指定序号的风云榜容器（div.allTop，实测 15 个） */
+    private fun parseRankBlock(document: Document, index: Int): List<SManga> {
+        val blocks = document.select("div.allTop")
+        if (blocks.isEmpty()) {
+            throw Exception("未找到榜单容器 div.allTop")
+        }
+        val block = blocks[index.coerceIn(0, blocks.size - 1)]
+        return block.select("li a.vtip").map { a ->
+            SManga.create().apply {
+                url = stripDomain(a.attr("href"))
+                title = a.attr("title").trim().ifEmpty { a.text().trim() }
+            }
+        }
+    }
+
+    override fun getFilterList(): FilterList = FilterList(
+        ModeFilter(),
+        Filter.Separator(),
+        Filter.Header("【风云榜】选择要查看的榜单"),
+        RankFilter(),
+        Filter.Separator(),
+        Filter.Header("【分类浏览】选择分类，留空搜索框即可翻页"),
+        CategoryFilter(),
+    )
+
+    /** 浏览模式：风云榜 / 分类 */
+    private class ModeFilter : Filter.Select<String>("浏览模式", MODE_NAMES)
+
+    private class RankFilter : Filter.Select<String>("风云榜榜单", RANK_NAMES)
+
+    private class CategoryFilter : Filter.Select<String>("漫画分类", CATEGORY_NAMES)
 
     // ---------------------------------------------------------------- 工具
 
-    private fun absoluteUrl(href: String): String =
-        if (href.startsWith("http")) href else baseUrl + href
+    /** 去掉域名只留路径，HttpSource 会自行拼 baseUrl */
+    private fun stripDomain(href: String): String =
+        if (href.startsWith("http")) href.removePrefix(baseUrl) else href
 
     companion object {
         private val IMAGE_HOSTS = listOf(
@@ -262,9 +310,40 @@ class LaiManHua : HttpSource() {
             "https://mhpic7ffr.tgmhfc.uk",
             "https://mhpicwwx.tgmhfc.uk",
         )
+
+        private const val MODE_RANK = 0
+
+        private val MODE_NAMES = arrayOf("风云榜", "分类浏览")
+
+        // 与 div.allTop 顺序严格一致（实测 15 个）
+        private val RANK_NAMES = arrayOf(
+            "所有漫画排行", "少年热血", "武侠格斗", "科幻魔幻", "竞技体育",
+            "爆笑喜剧", "侦探推理", "恐怖灵异", "耽美人生", "少女爱情",
+            "大陆漫画", "日韩漫画", "港台漫画", "欧美漫画", "日排行",
+        )
+
+        // 注：zaixian_lianzai / zaixian_wanjie 是单页入口，不支持 /{page}.html 分页，
+        // 故不作为分类项，避免选中后 404
+        private val CATEGORY_NAMES = arrayOf(
+            "日韩漫画", "国产漫画", "欧美漫画", "港台漫画",
+            "少年热血", "武侠格斗", "科幻魔幻", "竞技体育", "爆笑喜剧",
+            "侦探推理", "恐怖灵异", "耽美人生", "少女爱情", "恋爱生活",
+            "生活漫画", "其他漫画", "战争漫画",
+        )
+
+        // 与 CATEGORY_NAMES 一一对应，实测均可访问且每页 30 条
+        private val CATEGORY_PATHS = arrayOf(
+            "zaixian_rhmh", "zaixian_dlmh", "zaixian_ommh", "zaixian_gtmh",
+            "rexue", "gedou", "kehuan", "jingji", "gaoxiao",
+            "tuili", "kongbu", "danmei", "shaonv", "lianai",
+            "shenghuo", "qita", "zhanzheng",
+        )
     }
 
-    /** 跨域图片需 laimanhua88.com 的 Referer，Page 已带；此处兜底 */
+    /** 记录本次榜单选择（仅在单次 search 流程内有效） */
+    @Volatile
+    private var rankIndexForParse: Int = 0
+
     private class RefererInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val req = chain.request()

@@ -40,6 +40,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install Pillow for icon resizing
+        run: pip install --quiet Pillow
+
       - name: Setup Gradle 8.2
         uses: gradle/actions/setup-gradle@v3
         with:
@@ -114,9 +117,12 @@ jobs:
             --badge "$BADGE" \
             --website "https://github.com/${GITHUB_REPOSITORY}" \
             --repo-base "$REPO_BASE" \
+            --icon icon-source.png \
             --out dist
           echo "---- 校验 index.pb ----"
           python3 index-gen/decode_pb.py dist/index.pb
+          echo "---- 校验图标 ----"
+          python3 -c "from PIL import Image; im=Image.open('dist/icon/eu.kanade.tachiyomi.extension.zh.laimanhua.png'); print('icon size:', im.size)"
 
       - name: Publish to repo branch
         env:

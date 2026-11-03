@@ -120,6 +120,7 @@ def main():
     ap.add_argument('--store-name', default='LaiManHua')
     ap.add_argument('--badge', default='LMH')
     ap.add_argument('--website', default='https://github.com/fanhongchang01-hub/laimanhua-mihon')
+    ap.add_argument('--icon', default='', help='源图标 PNG 路径，会缩放为 256x256')
     ap.add_argument('--out', default='dist')
     args = ap.parse_args()
 
@@ -204,9 +205,21 @@ def main():
     with open(os.path.join(args.out, 'index.min.json'), 'w', encoding='utf-8') as f:
         json.dump(legacy, f, ensure_ascii=False, separators=(',', ':'))
 
-    # 图标占位（legacy 路径会请求它；没有图标会让列表显示空白）
+    # 扩展图标：Mihon 从 {base}/icon/{pkg}.png 拉取。
+    # 若提供了 --icon，则缩放成 256x256 输出；否则写入 1x1 占位（列表会显示空白）。
     icon_path = os.path.join(args.out, 'icon', f'{pkg}.png')
-    if not os.path.exists(icon_path):
+    if args.icon and os.path.exists(args.icon):
+        try:
+            from PIL import Image
+            img = Image.open(args.icon).convert('RGBA')
+            img = img.resize((256, 256), Image.LANCZOS)
+            img.save(icon_path, 'PNG')
+            print('icon ->', icon_path, '(256x256 from', args.icon, ')')
+        except Exception as e:
+            print('WARN: 图标处理失败，改用占位:', e)
+            with open(icon_path, 'wb') as f:
+                f.write(PLACEHOLDER_PNG)
+    elif not os.path.exists(icon_path):
         with open(icon_path, 'wb') as f:
             f.write(PLACEHOLDER_PNG)
 
