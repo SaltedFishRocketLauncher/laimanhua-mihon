@@ -78,6 +78,21 @@ jobs:
           echo "GRADLE_EXIT=$RC"
           exit $RC
 
+      - name: Verify APK is a valid Mihon extension
+        run: |
+          set -e
+          APK=$(find build/outputs/apk/release -name "*.apk" | head -1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt2 | head -1)
+          echo "---- 关键校验：uses-feature tachiyomi.extension ----"
+          "$AAPT" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/mf.txt
+          if grep -q "tachiyomi.extension" /tmp/mf.txt; then
+            echo "OK: 已声明 tachiyomi.extension feature"
+          else
+            echo "FAIL: 缺少 uses-feature tachiyomi.extension，Mihon 不会加载"
+            exit 1
+          fi
+          grep -A2 -B2 "uses-feature" /tmp/mf.txt || true
+
       - name: Generate repo index
         run: |
           set -e

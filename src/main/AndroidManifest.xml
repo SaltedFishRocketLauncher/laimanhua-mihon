@@ -2,6 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
+      这一行是必需的。Mihon 的 ExtensionLoader.isPackageAnExtension() 判据是：
+        pkgInfo.reqFeatures.any { it.name == "tachiyomi.extension" }
+      缺少它，APK 即使装上、有包名，Mihon 也完全不会把它当作扩展加载
+      —— 表现正是"安装成功但 Mihon 里看不到/用不了"。
+    -->
+    <uses-feature android:name="tachiyomi.extension" />
+
+    <!--
       Mihon 读取的元数据（与 ExtensionLoader.kt 常量一致）：
         tachiyomi.extension.class  —— 入口类（Source 或 SourceFactory），必需
         tachiyomix.name            —— 扩展显示名；缺失时退化为包名
