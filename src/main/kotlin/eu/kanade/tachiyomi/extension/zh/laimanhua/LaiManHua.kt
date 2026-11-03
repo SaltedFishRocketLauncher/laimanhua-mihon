@@ -111,11 +111,11 @@ class LaiManHua : HttpSource() {
         }
 
         return anchors.map { a ->
-            SChapter.create().apply {
-                name = a.text().trim().ifEmpty { a.attr("title").trim() }
-                // 必须存相对路径：HttpSource.getChapterUrl() 会做 baseUrl + url
-                url = stripDomain(a.attr("href"))
-            }
+            val chapter = SChapter.create()
+            chapter.name = a.text().trim().ifEmpty { a.attr("title").trim() }
+            // 必须存相对路径：HttpSource.getChapterUrl() 会做 baseUrl + url
+            chapter.url = stripDomain(a.attr("href"))
+            chapter
         }
     }
 
@@ -201,10 +201,10 @@ class LaiManHua : HttpSource() {
     override fun latestUpdatesParse(response: Response): MangasPage {
         val document = parseBody(response)
         val mangas = document.select("div.updateList li a.video").map { a ->
-            SManga.create().apply {
-                url = stripDomain(a.attr("href"))
-                title = a.text().trim()
-            }
+            val manga = SManga.create()
+            manga.url = stripDomain(a.attr("href"))
+            manga.title = a.text().trim()
+            manga
         }
         return MangasPage(mangas, false)
     }
@@ -252,10 +252,10 @@ class LaiManHua : HttpSource() {
         val items = document.select("div.dmList dl dt a[href]")
         if (items.isNotEmpty()) {
             val mangas = items.map { a ->
-                SManga.create().apply {
-                    url = stripDomain(a.attr("href"))
-                    title = a.attr("title").trim().ifEmpty { a.text().trim() }
-                }
+                val manga = SManga.create()
+                manga.url = stripDomain(a.attr("href"))
+                manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                manga
             }
             val hasNext = document.select("div.pages a").any { it.text().contains("下一页") }
             return MangasPage(mangas, hasNext)
@@ -263,8 +263,6 @@ class LaiManHua : HttpSource() {
 
         return MangasPage(emptyList(), false)
     }
-
-    override fun searchMangaSelector(): String = "div.dmList dl dt a[href]"
 
     /** 解析指定序号的风云榜容器（div.allTop，实测 15 个） */
     private fun parseRankBlock(document: Document, index: Int): List<SManga> {
@@ -274,10 +272,10 @@ class LaiManHua : HttpSource() {
         }
         val block = blocks[index.coerceIn(0, blocks.size - 1)]
         return block.select("li a.vtip").map { a ->
-            SManga.create().apply {
-                url = stripDomain(a.attr("href"))
-                title = a.attr("title").trim().ifEmpty { a.text().trim() }
-            }
+            val manga = SManga.create()
+            manga.url = stripDomain(a.attr("href"))
+            manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+            manga
         }
     }
 
