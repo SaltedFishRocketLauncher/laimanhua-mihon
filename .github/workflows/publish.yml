@@ -68,8 +68,12 @@ jobs:
           gradle wrapper --gradle-version 8.2
           VCODE=$(git rev-list --count HEAD)
           echo "VCODE=$VCODE"
+          set +e
           ./gradlew assembleRelease --stacktrace \
-            -PversionCode="$VCODE" -PversionName="1.4.${VCODE}"
+            -PversionCode="$VCODE" -PversionName="1.4.${VCODE}" 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          echo "GRADLE_EXIT=$RC"
+          exit $RC
 
       - name: Generate repo index
         run: |
@@ -129,7 +133,8 @@ jobs:
         run: |
           mkdir -p /tmp/pub && cd /tmp/pub
           git init -q && git checkout -q -b logdump
-          tail -c 40000 "$GITHUB_WORKSPACE/build.log" > build.log 2>/dev/null || echo "no log" > build.log
+          cp "$GITHUB_WORKSPACE/build.log" build.log 2>/dev/null || echo "no log found in $GITHUB_WORKSPACE" > build.log
+          tail -c 40000 build.log > build.tail && mv build.tail build.log
           git add -A && git config user.name bot && git config user.email bot@x
           git commit -q -m "log" && git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" logdump
 
