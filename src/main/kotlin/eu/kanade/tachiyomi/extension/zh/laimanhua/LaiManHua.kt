@@ -4,17 +4,17 @@ import android.util.Base64
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.SourceFactory
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.source.online.HttpSource
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import java.io.IOException
 import java.nio.charset.Charset
 
@@ -27,7 +27,15 @@ class LaiManHuaFactory : SourceFactory {
 class CloudflareChallengeException(url: String) :
     Exception("Cloudflare JS challenge @ $url")
 
-class LaiManHua : ParsedHttpSource() {
+/**
+ * 改用 HttpSource 而非 ParsedHttpSource。
+ *
+ * 原因（实测）：站点响应头是 `Content-Type: text/html`，不带 charset，
+ * 而实际字节是 GB18030。ParsedHttpSource 内部自行把 Response 交给 Jsoup，
+ * 会按 UTF-8 解码，中文全部乱码 —— 表现为"能装上、能点开，但标题章节全是
+ * 乱码或空列表"。因此这里接管全部解析，用 bytes + GB18030 自行构建 Document。
+ */
+class LaiManHua : HttpSource() {
 
     override val name = "来漫画"
     override val baseUrl = "https://www.laimanhua88.com"
@@ -50,35 +58,43 @@ class LaiManHua : ParsedHttpSource() {
 
     // ------------------------------------------------------------ 抓取/解码
 
-    private fun fetchDoc(url: String): Document {
-        val request = Request.Builder().url(url).headers(siteHeaders).build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                // [风险2] 区分两类 403：
-                //  A. CF JS Challenge —— body 含 "Just a moment"/"cf-challenge"/
-                //     "challenge-platform"，或响应头 cf-mitigated: challenge。
-                //  B. 站点自身封禁 —— 实测 /kanmanhua/ 的 403 是 IIS 风格
-                //     "403 - 禁止访问"，"Just a moment" 出现 0 次、无 cf-mitigated。
-                if (response.code == 403) {
-                    val body = response.body?.bytes()?.toString(gb18030).orEmpty()
-                    val isCf = body.contains("Just a moment") ||
-                        body.contains("cf-challenge") ||
-                        body.contains("challenge-platform") ||
-                        response.header("cf-mitigated")?.equals("challenge", true) == true
-                    if (isCf) throw CloudflareChallengeException(url)
-                    throw Exception("站点拒绝访问(非CF挑战) HTTP 403 @ $url")
-                }
-                throw Exception("HTTP ${response.code} @ $url")
+    /**
+     * 解析已拿到的 Response，绝不再发二次请求。
+     *
+     * 为什么必须自己解析：站点响应头是 `Content-Type: text/html`，不带 charset，
+     * 而实际字节是 GB18030。body.string() 会按 UTF-8 解，中文全部乱码。
+     * 所以统一走 bytes() + GB18030。
+     */
+    private fun parseBody(response: Response): Document {
+        val url = response.request.url.toString()
+
+        if (!response.isSuccessful) {
+            // [风险2] 区分两类 403：
+            //  A. CF JS Challenge —— 可用 WebView 拿 cf_clearance 后重试
+            //  B. 站点自身封禁 —— 实测 /kanmanhua/ 是 IIS 风格 403，WebView 也过不去
+            if (response.code == 403) {
+                val body = response.body?.bytes()?.toString(gb18030).orEmpty()
+                val isCf = body.contains("Just a moment") ||
+                    body.contains("cf-challenge") ||
+                    body.contains("challenge-platform") ||
+                    response.header("cf-mitigated")?.equals("challenge", true) == true
+                if (isCf) throw CloudflareChallengeException(url)
+                throw Exception("站点拒绝访问(非CF挑战) HTTP 403 @ $url")
             }
-            // 解码：响应头无 charset，须 bytes + GB18030
-            return Jsoup.parse(response.body!!.bytes().toString(gb18030), url)
+            throw Exception("HTTP ${response.code} @ $url")
         }
+
+        val bytes = response.body!!.bytes()
+        return Jsoup.parse(bytes.toString(gb18030), url)
     }
 
     // ------------------------------------------------------- mangaDetailsParse
 
-    // 修正：ParsedHttpSource 的入口是 mangaDetailsParse(Document)，不是 getMangaDetails
-    override fun mangaDetailsParse(document: Document): SManga {
+    override fun mangaDetailsRequest(manga: SManga): Request =
+        GET(absoluteUrl(manga.url), siteHeaders)
+
+    override fun mangaDetailsParse(response: Response): SManga {
+        val document = parseBody(response)
         fun meta(p: String): String =
             document.selectFirst("meta[property=\"$p\"]")?.attr("content")?.trim().orEmpty()
 
@@ -93,28 +109,42 @@ class LaiManHua : ParsedHttpSource() {
                 meta("og:novel:status").contains("连载") -> SManga.ONGOING
                 else -> SManga.UNKNOWN
             }
+            initialized = true
         }
     }
 
-    // ------------------------------------------------------- 章节列表
+    // ------------------------------------------------------- chapterListParse
 
-    // 修正：改为 chapterListSelector + chapterFromElement
-    // 实测 www 桌面模板为 div.plist，m 站移动模板为 #chapterList，用选择器组一次覆盖
-    override fun chapterListSelector(): String =
-        "div.plist li > a[href], #chapterList li a"
+    override fun chapterListRequest(manga: SManga): Request =
+        GET(absoluteUrl(manga.url), siteHeaders)
 
-    override fun chapterFromElement(element: Element): SChapter = SChapter.create().apply {
-        name = element.text().trim().ifEmpty { element.attr("title").trim() }
-        // 实测 href 全为相对路径 /kanmanhua/{slug}/{id}.html；
-        // ParsedHttpSource 的 chapterListParse 会交由 setUrlWithoutDomain 处理，这里存原始 href
-        url = element.attr("href")
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val document = parseBody(response)
+
+        // 实测 www 桌面模板为 div.plist，m 站移动模板为 #chapterList，用选择器组一次覆盖
+        val anchors = document.select("div.plist li > a[href]").ifEmpty {
+            document.select("#chapterList li a")
+        }
+        if (anchors.isEmpty()) {
+            throw Exception("章节列表为空，模板可能再次改版 @ ${response.request.url}")
+        }
+
+        return anchors.map { a ->
+            SChapter.create().apply {
+                name = a.text().trim().ifEmpty { a.attr("title").trim() }
+                url = absoluteUrl(a.attr("href"))
+            }
+        }
     }
 
-    // ------------------------------------------------------- pageListParse
+    // --------------------------------------------------------- pageListParse
 
-    // 修正：改为 pageListParse(Document)
-    override fun pageListParse(document: Document): List<Page> {
-        val chapterUrl = document.location()
+    override fun pageListRequest(chapter: SChapter): Request =
+        GET(absoluteUrl(chapter.url), siteHeaders)
+
+    override fun pageListParse(response: Response): List<Page> {
+        val chapterUrl = response.request.url.toString()
+        val document = parseBody(response)
         val payload = extractPicTree(document, chapterUrl)
 
         // 含 mh160tuku 即明文，否则 Base64；解码结果为 UTF-8 字节
@@ -136,9 +166,7 @@ class LaiManHua : ParsedHttpSource() {
         }
     }
 
-    // 修正：ParsedHttpSource 还要求实现 imageUrlParse(Document)（与 imageUrlParse(Response) 重载）
-    // 本图源的图片地址全部由 pageListParse 一次给出，故此处返回空串表示"无需二次解析"。
-    override fun imageUrlParse(document: Document): String = ""
+    override fun imageUrlParse(response: Response): String = ""
 
     /**
      * [风险1] 单次探测选主机。
@@ -184,6 +212,50 @@ class LaiManHua : ParsedHttpSource() {
         throw Exception("picTree 赋值解析失败 @ $chapterUrl")
     }
 
+    // ------------------------------------------- popular / latest / search
+
+    // [风险3] 独立热门页 /kanmanhua/zaixian_hit.html（漫画排行榜）
+    override fun popularMangaRequest(page: Int): Request =
+        GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
+
+    override fun popularMangaParse(response: Response): MangasPage {
+        val document = parseBody(response)
+        val mangas = document.select("div.allTop li a.vtip").map { a ->
+            SManga.create().apply {
+                url = absoluteUrl(a.attr("href"))
+                title = a.attr("title").trim()
+            }
+        }
+        return MangasPage(mangas, false)
+    }
+
+    // [风险3] latestUpdates 走最新更新页
+    override fun latestUpdatesRequest(page: Int): Request =
+        GET("$baseUrl/kanmanhua/zaixian_recent.html", siteHeaders)
+
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        val document = parseBody(response)
+        val mangas = document.select("div.updateList li a.video").map { a ->
+            SManga.create().apply {
+                url = absoluteUrl(a.attr("href"))
+                title = a.text().trim()
+            }
+        }
+        return MangasPage(mangas, false)
+    }
+
+    // [风险4] 搜索入口实测不可用：/cse/search/ → 404；/cse1/search/ POST → 405。
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
+        throw Exception("该图源暂不支持搜索")
+
+    override fun searchMangaParse(response: Response): MangasPage =
+        MangasPage(emptyList(), false)
+
+    // ---------------------------------------------------------------- 工具
+
+    private fun absoluteUrl(href: String): String =
+        if (href.startsWith("http")) href else baseUrl + href
+
     companion object {
         private val IMAGE_HOSTS = listOf(
             "https://mhpic5eer.tgmhfc.uk",
@@ -207,43 +279,4 @@ class LaiManHua : ParsedHttpSource() {
             }
         }
     }
-
-    // ------------------------------------------- popular / latest / search
-
-    // [风险3] 独立热门页 /kanmanhua/zaixian_hit.html（漫画排行榜）
-    override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
-
-    override fun popularMangaSelector(): String = "div.allTop li a.vtip"
-
-    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        url = element.attr("href")           // 实测全为相对路径
-        title = element.attr("title").trim() // 实测 225 条 title 全非空
-    }
-
-    override fun popularMangaNextPageSelector(): String? = null
-
-    // [风险3] latestUpdates 保持原样
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/kanmanhua/zaixian_recent.html", siteHeaders)
-
-    override fun latestUpdatesSelector(): String = "div.updateList li a.video"
-
-    override fun latestUpdatesFromElement(element: Element): SManga = SManga.create().apply {
-        url = element.attr("href")
-        title = element.text().trim()
-    }
-
-    override fun latestUpdatesNextPageSelector(): String? = null
-
-    // [风险4] 搜索入口实测不可用：/cse/search/ → 404；/cse1/search/ POST → 405。
-    // 抛错优于返回最新列表，避免"搜任何词都有结果"的误导。
-    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request =
-        throw Exception("该图源暂不支持搜索")
-
-    override fun searchMangaSelector(): String = "div.__no_search__"
-
-    override fun searchMangaFromElement(element: Element): SManga = SManga.create()
-
-    override fun searchMangaNextPageSelector(): String? = null
 }

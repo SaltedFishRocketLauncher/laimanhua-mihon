@@ -1,11 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Mihon/Tachiyomi 通过该 meta-data 反射加载 SourceFactory 实现 -->
-    <application>
+    <!--
+      Mihon 读取的元数据（与 ExtensionLoader.kt 常量一致）：
+        tachiyomi.extension.class  —— 入口类（Source 或 SourceFactory），必需
+        tachiyomix.name            —— 扩展显示名；缺失时退化为包名
+        tachiyomix.extensionLib    —— 扩展库版本，必须是 1.4 或 1.6
+        tachiyomix.contentWarning  —— 内容分级 0=SAFE 1=MIXED 2=NSFW
+    -->
+    <application android:label="来漫画">
         <meta-data
             android:name="tachiyomi.extension.class"
             android:value="eu.kanade.tachiyomi.extension.zh.laimanhua.LaiManHuaFactory" />
+
+        <meta-data
+            android:name="tachiyomix.name"
+            android:value="来漫画" />
+
+        <meta-data
+            android:name="tachiyomix.extensionLib"
+            android:value="1.4" />
+
+        <meta-data
+            android:name="tachiyomix.contentWarning"
+            android:value="0" />
     </application>
 
 </manifest>
