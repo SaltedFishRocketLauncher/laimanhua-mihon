@@ -42,37 +42,41 @@ jobs:
         with:
           gradle-version: '8.2'
 
-      # 固定 keystore：优先用 Secrets，没有则用仓库内 keystore 或生成一次
+      # 固定 keystore：多次构建必须签名一致，否则 Mihon 拒绝覆盖安装。
+      # 优先级：Secrets > repo 分支已存档 > 首次生成（随后会存档到 repo 分支）
       - name: Prepare signing keystore
         env:
           KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
+          set -e
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > laimanhua.keystore
             echo "使用 Secrets 中的 keystore"
-          elif [ -f laimanhua.keystore ]; then
-            echo "使用仓库内已有 keystore"
+            exit 0
+          fi
+          git fetch origin "$REPO_BRANCH" --depth 1 || true
+          if git show "origin/$REPO_BRANCH:signing/laimanhua.keystore" > laimanhua.keystore 2>/dev/null; then
+            echo "复用 repo 分支已存档的 keystore"
           else
-            keytool -genkeypair -v \
-              -keystore laimanhua.keystore -alias laimanhua \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass laimanhua -keypass laimanhua \
-              -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
-            echo "已生成新 keystore（注意：每次构建指纹会变，正式使用请改用 Secrets）"
+            keytool -genkeypair -v -keystore laimanhua.keystore -alias laimanhua -keyalg RSA -keysize 2048 -validity 10000 -storepass laimanhua -keypass laimanhua -dname "CN=LaiManHua, OU=Ext, O=LaiManHua, L=NA, ST=NA, C=CN"
+            echo "首次生成 keystore，将随索引存档到 repo 分支"
           fi
 
       - name: Build APK
         run: |
+          set -e
           gradle wrapper --gradle-version 8.2
-          ./gradlew assembleRelease --stacktrace
+          VCODE=$(git rev-list --count HEAD)
+          echo "VCODE=$VCODE"
+          ./gradlew assembleRelease --stacktrace \
+            -PversionCode="$VCODE" -PversionName="1.4.${VCODE}"
 
       - name: Generate repo index
         run: |
-          # 版本号从 APK 读取（脚本内用 aapt/openssl），无需手工同步
+          set -e
           APK=$(find build/outputs/apk/release -name "*.apk" | head -1)
           echo "APK=$APK"
           VCODE=$(git rev-list --count HEAD)
-          VNAME="1.4.${VCODE}"
           REPO_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPO_BRANCH}"
           python3 index-gen/gen_index.py \
             --apk "$APK" \
@@ -83,32 +87,40 @@ jobs:
             --lang "$LANG" \
             --base-url "$BASE_URL" \
             --version-code "$VCODE" \
-            --version-name "$VNAME" \
+            --version-name "1.4.${VCODE}" \
             --store-name "$STORE_NAME" \
             --badge "$BADGE" \
             --website "https://github.com/${GITHUB_REPOSITORY}" \
             --repo-base "$REPO_BASE" \
             --out dist
-          echo "---- 校验 index.pb 可解码 ----"
+          echo "---- 校验 index.pb ----"
           python3 index-gen/decode_pb.py dist/index.pb
 
       - name: Publish to repo branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
+          mkdir -p dist/signing
+          cp laimanhua.keystore dist/signing/laimanhua.keystore
           cd dist
           git init -q
           git checkout -q -b "$REPO_BRANCH"
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
-          printf '%s\n' '# 扩展仓库索引（自动生成，勿手改）' '' \
-            'Mihon 添加地址：' '' \
-            '```' \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPO_BRANCH}/index.min.json" \
-            '```' > README.md
+          cat > README.md <<'RMEOF'
+          # 扩展仓库索引（自动生成，勿手改）
+
+          Mihon 添加地址（复制到「设置 → 浏览 → 扩展仓库」）：
+
+          ```
+          REPO_URL_PLACEHOLDER
+          ```
+          RMEOF
+          sed -i "s|REPO_URL_PLACEHOLDER|https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPO_BRANCH}/index.min.json|" README.md
           git add -A
-          git commit -q -m "repo: build $(date -u +%Y%m%d-%H%M%S)"
+          git commit -q -m "repo: build $(date -u +%Y%m%d-%H%M%S) v${VCODE}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$REPO_BRANCH"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload APK artifact
         if: always()

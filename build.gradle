@@ -11,8 +11,9 @@ android {
         applicationId 'eu.kanade.tachiyomi.extension.zh.laimanhua'
         minSdk 21
         targetSdk 34
-        versionCode 1
-        versionName '1.4.1'
+        // 允许 CI 通过 -PversionCode / -PversionName 注入，保证 APK 与索引一致
+        versionCode (project.findProperty('versionCode') ?: 1) as Integer
+        versionName (project.findProperty('versionName') ?: '1.4.1')
     }
 
     signingConfigs {
