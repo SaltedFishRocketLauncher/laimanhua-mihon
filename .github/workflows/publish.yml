@@ -94,6 +94,23 @@ jobs:
             echo "FAIL: 缺少 uses-feature tachiyomi.extension，Mihon 不会加载"
             exit 1
           fi
+
+          echo "---- 关键校验：application 的 icon 属性 ----"
+          if grep -q "icon" /tmp/mf.txt; then
+            echo "OK: 已声明 android:icon"
+          else
+            echo "FAIL: application 缺少 android:icon，Mihon 会显示默认图标"
+            exit 1
+          fi
+
+          echo "---- 关键校验：APK 内存在图标资源 ----"
+          if unzip -l "$APK" | grep -q "res/.*ic_launcher"; then
+            echo "OK: APK 内包含 ic_launcher 资源"
+            unzip -l "$APK" | grep "ic_launcher" || true
+          else
+            echo "FAIL: APK 内没有 ic_launcher 资源"
+            exit 1
+          fi
           grep -A2 -B2 "uses-feature" /tmp/mf.txt || true
 
       - name: Generate repo index
