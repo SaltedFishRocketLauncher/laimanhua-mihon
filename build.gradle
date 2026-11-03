@@ -11,9 +11,11 @@ android {
         applicationId 'eu.kanade.tachiyomi.extension.zh.laimanhua'
         minSdk 21
         targetSdk 34
-        // 允许 CI 通过 -PversionCode / -PversionName 注入，保证 APK 与索引一致
-        versionCode (project.findProperty('versionCode') ?: 1) as Integer
-        versionName (project.findProperty('versionName') ?: '1.4.1')
+        // 允许 CI 通过 -PversionCode / -PversionName 注入，保证 APK 与索引一致。
+        // 用显式类型转换：findProperty 返回 String，直接 as Integer 在 Gradle 8.2
+        // 会抛 IllegalArgumentException: Value is null（实测 build.gradle:15）
+        versionCode Integer.parseInt(project.findProperty('versionCode')?.toString() ?: '1')
+        versionName project.findProperty('versionName')?.toString() ?: '1.4.1'
     }
 
     signingConfigs {
