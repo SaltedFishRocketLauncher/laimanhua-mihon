@@ -204,6 +204,9 @@ class LaiManHua : HttpSource() {
             val manga = SManga.create()
             manga.url = stripDomain(a.attr("href"))
             manga.title = a.text().trim()
+            // 实测：最新页的封面不在 <img>，而在 <a> 的自定义属性 i 上
+            // 形如 i="https://p.miyeye.cn/.../xxx.jpg@!180x240"
+            manga.thumbnail_url = normalizeThumb(a.attr("i"))
             manga
         }
         return MangasPage(mangas, false)
@@ -249,12 +252,20 @@ class LaiManHua : HttpSource() {
         }
 
         // 分类页分支
-        val items = document.select("div.dmList dl dt a[href]")
-        if (items.isNotEmpty()) {
-            val mangas = items.map { a ->
+        // 实测结构：<li><p class="fl cover"><a class="pic"><img src="封面"></a></p>
+        //                <dl><dt><a href="/kanmanhua/xxx/" title="标题">…
+        // 封面与标题在不同分支，必须从整个 li 取，不能只取 dt a
+        val lis = document.select("div.dmList li")
+        if (lis.isNotEmpty()) {
+            val mangas = lis.mapNotNull { li ->
+                val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
                 val manga = SManga.create()
                 manga.url = stripDomain(a.attr("href"))
                 manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                // 封面在 p.cover img 的 src；部分条目没有，此时留空由 Mihon 走详情页补
+                manga.thumbnail_url = normalizeThumb(
+                    li.selectFirst("p.cover img")?.attr("src").orEmpty()
+                )
                 manga
             }
             val hasNext = document.select("div.pages a").any { it.text().contains("下一页") }
@@ -275,6 +286,8 @@ class LaiManHua : HttpSource() {
             val manga = SManga.create()
             manga.url = stripDomain(a.attr("href"))
             manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+            // 实测：榜单页封面同样在 <a class="vtip" i="..."> 的 i 属性上
+            manga.thumbnail_url = normalizeThumb(a.attr("i"))
             manga
         }
     }
@@ -301,6 +314,23 @@ class LaiManHua : HttpSource() {
     /** 去掉域名只留路径，HttpSource 会自行拼 baseUrl */
     private fun stripDomain(href: String): String =
         if (href.startsWith("http")) href.removePrefix(baseUrl) else href
+
+    /**
+     * 统一处理封面地址。
+     *
+     * 实测站点有两处坑：
+     *  1. 地址带 `@!180x240` 缩略参数（服务端按此裁剪），保留它可显著减小流量；
+     *     该参数不影响可访问性（实测带与不带均 200）。
+     *  2. 协议可能是 http，统一升到 https，避免 Android 9+ 明文流量被拦。
+     * 空值直接返回空串，交由 Mihon 回落到详情页封面。
+     */
+    private fun normalizeThumb(raw: String): String {
+        var v = raw.trim()
+        if (v.isEmpty()) return ""
+        if (v.startsWith("//")) v = "https:$v"
+        if (v.startsWith("http://")) v = "https://" + v.removePrefix("http://")
+        return v
+    }
 
     companion object {
         private val IMAGE_HOSTS = listOf(
