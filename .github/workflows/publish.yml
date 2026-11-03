@@ -122,6 +122,17 @@ jobs:
           git commit -q -m "repo: build $(date -u +%Y%m%d-%H%M%S) v${VCODE}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$REPO_BRANCH"
 
+      - name: Dump build log on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/pub && cd /tmp/pub
+          git init -q && git checkout -q -b logdump
+          tail -c 40000 "$GITHUB_WORKSPACE/build.log" > build.log 2>/dev/null || echo "no log" > build.log
+          git add -A && git config user.name bot && git config user.email bot@x
+          git commit -q -m "log" && git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" logdump
+
       - name: Upload APK artifact
         if: always()
         uses: actions/upload-artifact@v4
