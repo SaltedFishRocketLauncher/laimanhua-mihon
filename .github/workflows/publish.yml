@@ -168,6 +168,18 @@ jobs:
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$REPO_BRANCH"
 
 
+      - name: Dump log
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/p && cd /tmp/p
+          git init -q && git checkout -q -b logdump
+          cp "$GITHUB_WORKSPACE/build.log" build.log 2>/dev/null || echo none > build.log
+          tail -c 30000 build.log > a.log && mv a.log build.log
+          git add -A && git config user.name b && git config user.email b@x
+          git commit -q -m log && git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" logdump
+
       - name: Upload APK artifact
         if: always()
         uses: actions/upload-artifact@v4
