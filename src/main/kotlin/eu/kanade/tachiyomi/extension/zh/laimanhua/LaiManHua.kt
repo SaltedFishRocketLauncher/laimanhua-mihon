@@ -182,34 +182,77 @@ class LaiManHua : HttpSource() {
         throw Exception("picTree 赋值解析失败 @ $chapterUrl")
     }
 
-    // ------------------------------------------------------- 热门（默认榜单）
+    // ------------------------------------------------------- 热门（全部榜单合并）
 
+    // 实测：zaixian_hit.html 是单页静态文件，无分页控件、无「下一页」，
+    // 一页内已含 15 个榜单 × 15 条 = 225 条。因此不做翻页，
+    // 但要把多个榜单合并返回，避免之前只取第一个榜导致「只有十几本」。
     override fun popularMangaRequest(page: Int): Request =
         GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
 
     override fun popularMangaParse(response: Response): MangasPage {
         val document = parseBody(response)
-        // 默认展示第一个榜单「所有漫画排行」
-        return MangasPage(parseRankBlock(document, 0), false)
+        val blocks = document.select("div.allTop")
+        if (blocks.isEmpty()) {
+            throw Exception("未找到榜单容器 div.allTop @ ${response.request.url}")
+        }
+
+        // 合并所有榜单并去重（同一作品会出现在多个分类榜中）
+        val seen = LinkedHashSet<String>()
+        val mangas = ArrayList<SManga>()
+        for (block in blocks) {
+            for (a in block.select("li a.vtip")) {
+                val path = stripDomain(a.attr("href"))
+                if (path.isBlank() || !seen.add(path)) continue
+                val manga = SManga.create()
+                manga.url = path
+                manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                // 实测：榜单页封面在 <a class="vtip" i="..."> 的 i 属性上
+                manga.thumbnail_url = normalizeThumb(a.attr("i"))
+                mangas.add(manga)
+            }
+        }
+
+        // 无下一页：该页已是全量榜单
+        return MangasPage(mangas, false)
     }
 
-    // ------------------------------------------------------- 最新
+    // ------------------------------------------------------- 最新更新（可翻页）
 
-    override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/kanmanhua/zaixian_recent.html", siteHeaders)
+    // 实测：zaixian_recent.html 是单页静态文件（100 条，无分页控件、无「下一页」），
+    // 真正的分页入口是分类页 /kanmanhua/{cat}/{page}.html，每页 30 条，
+    // 且实测该分类页本身按「更新于」倒序（第 1-2 页为 09-16，第 3 页为 09-15）。
+    // 因此最新更新改走分类页翻页，遍历各分类以覆盖全站更新。
+    override fun latestUpdatesRequest(page: Int): Request {
+        val idx = (page - 1).coerceAtLeast(0)
+        val cat = LATEST_CATEGORIES[idx % LATEST_CATEGORIES.size]
+        val subPage = idx / LATEST_CATEGORIES.size + 1
+        return GET("$baseUrl/kanmanhua/$cat/$subPage.html", siteHeaders)
+    }
 
     override fun latestUpdatesParse(response: Response): MangasPage {
         val document = parseBody(response)
-        val mangas = document.select("div.updateList li a.video").map { a ->
+
+        val lis = document.select("div.dmList li")
+        if (lis.isEmpty()) {
+            return MangasPage(emptyList(), false)
+        }
+
+        val mangas = lis.mapNotNull { li ->
+            val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
             val manga = SManga.create()
             manga.url = stripDomain(a.attr("href"))
-            manga.title = a.text().trim()
-            // 实测：最新页的封面不在 <img>，而在 <a> 的自定义属性 i 上
-            // 形如 i="https://p.miyeye.cn/.../xxx.jpg@!180x240"
-            manga.thumbnail_url = normalizeThumb(a.attr("i"))
+            manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+            // 实测：分类页封面在 p.cover img 的 src（与标题不在同一分支）
+            manga.thumbnail_url = normalizeThumb(
+                li.selectFirst("p.cover img")?.attr("src").orEmpty(),
+            )
             manga
         }
-        return MangasPage(mangas, false)
+
+        // 以站点自身是否提供「下一页」为准
+        val hasNext = document.select("a").any { it.text().contains("下一页") }
+        return MangasPage(mangas, hasNext)
     }
 
     // --------------------------------------- 分类筛选 + 风云榜（统一走 search）
@@ -365,6 +408,17 @@ class LaiManHua : HttpSource() {
             "rexue", "gedou", "kehuan", "jingji", "gaoxiao",
             "tuili", "kongbu", "danmei", "shaonv", "lianai",
             "shenghuo", "qita", "zhanzheng",
+        )
+
+        /**
+         * 最新更新翻页所用的分类序列。
+         * 实测这些分类页均按「更新于」倒序（第 1-2 页 09-16、第 3 页 09-15），
+         * 每页 30 条且提供「下一页」。
+         * 取 4 个覆盖面最广的分类轮流翻页：page 1..4 对应各分类第 1 页，
+         * page 5..8 对应各分类第 2 页，依此类推。
+         */
+        private val LATEST_CATEGORIES = arrayOf(
+            "rexue", "gedou", "kehuan", "shaonv",
         )
     }
 
