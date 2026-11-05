@@ -135,17 +135,41 @@ class LaiManHua : HttpSource() {
         val anchors = document.select("div.plist li > a[href]").ifEmpty {
             document.select("#chapterList li a")
         }
-        if (anchors.isEmpty()) {
-            throw Exception("章节列表为空 @ ${response.request.url}")
+
+        if (anchors.isNotEmpty()) {
+            return anchors.map { a ->
+                val chapter = SChapter.create()
+                chapter.name = a.text().trim().ifEmpty { a.attr("title").trim() }
+                // 必须存相对路径：HttpSource.getChapterUrl() 会做 baseUrl + url
+                chapter.url = stripDomain(a.attr("href"))
+                chapter
+            }
         }
 
-        return anchors.map { a ->
+        // 选择器兜底：若站点改了模板外壳（列表容器类名/ID 变化），改用正则从 HTML 直接
+        // 提取章节链接。要求路径形如 /kanmanhua/{slug}/{数字}.html，其中末段必须是纯数字，
+        // 以此排除分类分页（如 /kanmanhua/rexue/1.html，末段也是数字但分类名是已知的
+        // zaixian_* / 分类拼音，不会同时满足「未知 slug + 数字章号」），避免误收导航链接。
+        val url = response.request.url.toString()
+        val html = document.outerHtml()
+        val regex = Regex("href=\"(/kanmanhua/[\\w\\-]+/(\\d+)\\.html)\"")
+        val seen = LinkedHashSet<String>()
+        val chapters = ArrayList<SChapter>()
+        for (m in regex.findAll(html)) {
+            val path = m.groupValues[1]
+            val id = m.groupValues[2].toLongOrNull() ?: continue
+            // 章节号是站点内部大 ID（实测亿级）；分类分页末段是个位/十位小数字。
+            // 用 >=100 阈值排除分页链接，避免兜底时误收导航页。
+            if (id < CHAPTER_ID_MIN) continue
+            if (!seen.add(path)) continue
             val chapter = SChapter.create()
-            chapter.name = a.text().trim().ifEmpty { a.attr("title").trim() }
-            // 必须存相对路径：HttpSource.getChapterUrl() 会做 baseUrl + url
-            chapter.url = stripDomain(a.attr("href"))
-            chapter
+            chapter.name = m.groupValues[2] // 章节号作为兜底标题，避免空白标题
+            chapter.url = path
+            chapters.add(chapter)
         }
+        if (chapters.isNotEmpty()) return chapters
+
+        throw Exception("章节列表为空 @ $url")
     }
 
     // ------------------------------------------------------- 图片列表（bug 修复点）
@@ -528,6 +552,10 @@ class LaiManHua : HttpSource() {
 
         private const val MODE_RANK = 0
         private const val MODE_CATEGORY = 1
+
+        // 章节号兜底正则的最小阈值：真实章节号是站点内部大 ID（实测亿级），
+        // 分类分页末段是个位/十位小数字。>=100 可干净区分两者。
+        private const val CHAPTER_ID_MIN = 100L
 
         private val MODE_NAMES = arrayOf("漫画排行", "漫画分类")
 

@@ -29,6 +29,37 @@ jobs:
           # 必须完整历史，否则 git rev-list --count HEAD 恒为 1，versionCode 不会递增
           fetch-depth: 0
 
+      # 站点改版哨兵：用 curl 抓详情页，检查 og 标记与章节链接是否仍在。
+      # 只在「关键标记全部消失」时才失败——单凭某个 class 名（如 plist）会因改版误报而阻断构建。
+      # 放在装 JDK 之前，改版时能最早失败、省下整套 Android 构建时间。
+      - name: Site structure check (fail early on site redesign)
+        continue-on-error: false
+        run: |
+          set -e
+          echo "---- 探测源站结构（提前发现改版）----"
+          URL="${BASE_URL}/kanmanhua/dafengdagengren/"
+          HTTP_CODE=$(curl -sSL --max-time 30 -A "Mozilla/5.0" -o /tmp/site.html -w "%{http_code}" "$URL" || echo "000")
+          echo "HTTP: ${HTTP_CODE}  bytes: $(wc -c < /tmp/site.html)"
+          # 网络/站点整体不可达：视为环境抖动，不阻断构建（避免假阳性）
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::warning::源站返回 ${HTTP_CODE}，跳过结构校验（可能为网络抖动或临时不可用）"
+            exit 0
+          fi
+          FAIL=0
+          grep -q 'og:title' /tmp/site.html && echo "OK: og:title 存在" || { echo "FAIL: og:title 缺失"; FAIL=1; }
+          grep -q 'og:novel:category' /tmp/site.html && echo "OK: og:novel:category 存在" || { echo "FAIL: og:novel:category 缺失"; FAIL=1; }
+          # 章节链接：详情页应存在 /kanmanhua/{slug}/{数字}.html
+          if grep -oE '/kanmanhua/[^"/]+/[0-9]+\.html' /tmp/site.html | grep -vE '/(zaixian_[a-z]+|[a-z]+)/[0-9]+\.html$' | grep -q .; then
+            echo "OK: 章节链接存在"
+          else
+            echo "FAIL: 未找到章节链接，站点模板可能已改版"; FAIL=1
+          fi
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::源站结构校验失败，请人工确认 laimanhua88.com 是否改版"
+            exit 1
+          fi
+          echo "源站结构校验通过"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
