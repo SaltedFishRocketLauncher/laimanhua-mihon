@@ -278,10 +278,19 @@ class LaiManHua : HttpSource() {
             return GET("$baseUrl/kanmanhua/$path/$page.html", siteHeaders)
         }
 
-        // 有搜索词但站点搜索接口不可用（/cse/search/ 404、/cse1/search/ 405 POST）。
-        // 这里不拿分类页冒充结果，交给解析层返回空列表。
+        // 有关键词：站点的 /cse1/search/ 表单实测 405、/cse/search/ 404，
+        // 官方搜索接口整体失效。改用「字母索引页 + 标题包含」实现搜索：
+        //   /kanmanhua/{a-z}.html 每页收录该拼音首字母下全部作品（约 700-740 条）
+        // 由关键词首字算出拼音首字母，只抓这一页，再在本地按标题过滤。
+        // 实测：「一人之下」-> y 页命中；「大奉打更人」-> d 页命中。
         rankIndexForParse = -1
-        return GET("$baseUrl/kanmanhua/rexue/1.html", siteHeaders)
+        searchKeyword = query.trim()
+
+        val letter = pinyinInitial(query.trim().firstOrNull())
+        val indexLetter = letter ?: "a"
+        // 记录实际使用的索引字母，解析时据此判断是否为搜索分支
+        searchIndexLetter = indexLetter
+        return GET("$baseUrl/kanmanhua/$indexLetter.html", siteHeaders)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
@@ -294,24 +303,40 @@ class LaiManHua : HttpSource() {
             return MangasPage(parseRankBlock(document, idx), false)
         }
 
-        // 分类页分支
+        // 分类页 / 字母索引页共用同一套 DOM（div.dmList li）
         // 实测结构：<li><p class="fl cover"><a class="pic"><img src="封面"></a></p>
         //                <dl><dt><a href="/kanmanhua/xxx/" title="标题">…
         // 封面与标题在不同分支，必须从整个 li 取，不能只取 dt a
         val lis = document.select("div.dmList li")
         if (lis.isNotEmpty()) {
+            // 是否为「字母索引搜索」分支：搜索词非空，且请求的正是该字母页
+            val kw = searchKeyword
+            val isIndexSearch = kw.isNotBlank() &&
+                url.endsWith("/kanmanhua/$searchIndexLetter.html")
+
             val mangas = lis.mapNotNull { li ->
                 val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
+                val title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                // 字母索引页含全站该首字母作品，必须在本地按关键词过滤
+                if (isIndexSearch && !title.contains(kw, ignoreCase = true)) {
+                    return@mapNotNull null
+                }
                 val manga = SManga.create()
                 manga.url = stripDomain(a.attr("href"))
-                manga.title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                manga.title = title
                 // 封面在 p.cover img 的 src；部分条目没有，此时留空由 Mihon 走详情页补
                 manga.thumbnail_url = normalizeThumb(
                     li.selectFirst("p.cover img")?.attr("src").orEmpty()
                 )
                 manga
             }
-            val hasNext = document.select("div.pages a").any { it.text().contains("下一页") }
+
+            // 字母索引页是单页全量，不翻页；分类页以站点「下一页」为准
+            val hasNext = if (isIndexSearch) {
+                false
+            } else {
+                document.select("div.pages a").any { it.text().contains("下一页") }
+            }
             return MangasPage(mangas, hasNext)
         }
 
@@ -375,6 +400,33 @@ class LaiManHua : HttpSource() {
         return v
     }
 
+    /**
+     * 取汉字/字母的拼音首字母，用于定位字母索引页。
+     *
+     * GB2312 一级汉字区（0xB0A1-0xD7F9）按拼音排序，故可用一张分段边界表
+     * 把汉字编码映射到首字母，无需引入拼音库。
+     * 边界表由 pypinyin 对一级字库逐字生成并校验：
+     *   一->y 大->d 死->s 进->j 火->h 妖->y 海->h 斗->d
+     */
+    private fun pinyinInitial(ch: Char?): String? {
+        if (ch == null) return null
+        if (ch.isLetter() && ch.code < 128) return ch.lowercaseChar().toString()
+        val bytes = try {
+            ch.toString().toByteArray(charset("GB2312"))
+        } catch (_: Exception) {
+            return null
+        }
+        if (bytes.size != 2) return null
+        val code = ((bytes[0].toInt() and 0xFF) shl 8) or (bytes[1].toInt() and 0xFF)
+        if (code < 0xB0A1 || code > 0xD7F9) return null
+
+        var letter = 'a'
+        for (pair in PINYIN_BOUNDS) {
+            if (code >= pair.first) letter = pair.second else break
+        }
+        return letter.toString()
+    }
+
     companion object {
         private val IMAGE_HOSTS = listOf(
             "https://mhpic5eer.tgmhfc.uk",
@@ -420,11 +472,40 @@ class LaiManHua : HttpSource() {
         private val LATEST_CATEGORIES = arrayOf(
             "rexue", "gedou", "kehuan", "shaonv",
         )
+
+        /**
+         * GB2312 一级汉字 -> 拼音首字母的分段边界（起始码, 字母）。
+         * 由 pypinyin 对 0xB0A1-0xD7F9 逐字生成，共 61 段。
+         * 用法：取第一个 code >= 起始码 的字母。
+         */
+        private val PINYIN_BOUNDS = arrayOf(
+            0xB0A1 to 'a', 0xB0C5 to 'b', 0xB1D9 to 'p', 0xB1DA to 'b', 0xB2B4 to 'p',
+            0xB2B5 to 'b', 0xB2C1 to 'c', 0xB3A4 to 'z', 0xB3A5 to 'c', 0xB3D7 to 's',
+            0xB3D8 to 'c', 0xB4EE to 'd', 0xB6EA to 'e', 0xB7A2 to 'f', 0xB8AC to 'p',
+            0xB8AD to 'f', 0xB8C1 to 'g', 0xB8F2 to 'h', 0xB8F3 to 'g', 0xB9FE to 'h',
+            0xBBF7 to 'j', 0xBCF7 to 'k', 0xBCF8 to 'j', 0xBFA6 to 'k', 0xBFA9 to 'g',
+            0xBFAA to 'k', 0xBFFE to 'g', 0xC0A1 to 'k', 0xC0AC to 'l', 0xC2E8 to 'm',
+            0xC4C3 to 'n', 0xC5B6 to 'o', 0xC5BE to 'p', 0xC6DA to 'q', 0xC7D1 to 'j',
+            0xC7D2 to 'q', 0xC8B2 to 'g', 0xC8B3 to 'q', 0xC8BB to 'r', 0xC8F6 to 's',
+            0xCBC5 to 'c', 0xCBC6 to 's', 0xCBFA to 't', 0xCDDA to 'w', 0xCEF4 to 'x',
+            0xCFC3 to 's', 0xCFC4 to 'x', 0xD0F3 to 'c', 0xD0F4 to 'x', 0xD1B9 to 'y',
+            0xD3F5 to 'x', 0xD3F6 to 'y', 0xD4D1 to 'z', 0xD4F8 to 'c', 0xD4F9 to 'z',
+            0xD4FE to 'y', 0xD5A1 to 'z', 0xD5B7 to 'n', 0xD5B8 to 'z', 0xD7B5 to 'c',
+            0xD7B6 to 'z',
+        )
     }
 
     /** 记录本次榜单选择（仅在单次 search 流程内有效） */
     @Volatile
     private var rankIndexForParse: Int = 0
+
+    /** 记录本次搜索关键词，供 searchMangaParse 做本地标题过滤 */
+    @Volatile
+    private var searchKeyword: String = ""
+
+    /** 记录本次搜索定位到的字母索引（a-z），用于区分搜索分支与分类分支 */
+    @Volatile
+    private var searchIndexLetter: String = "a"
 
     private class RefererInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
