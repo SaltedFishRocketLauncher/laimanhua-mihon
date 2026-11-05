@@ -258,50 +258,58 @@ class LaiManHua : HttpSource() {
     // --------------------------------------- 分类筛选 + 风云榜（统一走 search）
 
     /**
-     * Mihon 只在 search 流程传入 FilterList，因此「分类筛选」和「榜单切换」
-     * 都放在这里处理：不填搜索词时按所选模式浏览，填了则走站点搜索。
+     * Mihon 插件标准契约：filter 只在 search 流程传入，且 filter 是「在结果集上过滤」的
+     * 语义。仿原站导航，两个维度并列直出：
+     *   - 「浏览视图」决定数据源（排行 / 分类），默认 state=0 即排行视图；
+     *   - 「漫画排行」「漫画分类」下拉在各自视图内过滤。
+     * 有搜索词时优先走搜索。
+     *
+     * Mihon 标准做法：request 阶段把「本次浏览的是分类还是排行」记入 browsingCategory、
+     * 把榜单序号记入 rankIndexForParse，parse 阶段读同一标志分流，不依赖 URL 猜测，
+     * 避免并发或重定向导致解析错乱。
      */
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val mode = filters.filterIsInstance<ModeFilter>().firstOrNull()?.state ?: 0
+        val mode = filters.filterIsInstance<BrowseModeFilter>().firstOrNull()?.state ?: MODE_RANK
         val rank = filters.filterIsInstance<RankFilter>().firstOrNull()?.state ?: 0
         val category = filters.filterIsInstance<CategoryFilter>().firstOrNull()?.state ?: 0
 
-        // 模式 0：风云榜（不翻页，榜单只有一屏）
-        if (mode == MODE_RANK && query.isBlank()) {
+        if (query.isBlank()) {
+            // 分类视图：走分类页 /kanmanhua/{cat}/{page}.html 翻页（每页 30 条）
+            if (mode == MODE_CATEGORY) {
+                val path = CATEGORY_PATHS.getOrElse(category) { CATEGORY_PATHS[0] }
+                browsingCategory = true
+                return GET("$baseUrl/kanmanhua/$path/$page.html", siteHeaders)
+            }
+            // 排行视图（默认）：zaixian_hit.html 单屏，不翻页
+            browsingCategory = false
             rankIndexForParse = rank
             return GET("$baseUrl/kanmanhua/zaixian_hit.html", siteHeaders)
         }
 
-        // 模式 1：分类浏览（支持翻页）
-        if (query.isBlank()) {
-            val path = CATEGORY_PATHS.getOrElse(category) { CATEGORY_PATHS[0] }
-            return GET("$baseUrl/kanmanhua/$path/$page.html", siteHeaders)
-        }
-
-        // 有关键词：站点的 /cse1/search/ 表单实测 405、/cse/search/ 404，
-        // 官方搜索接口整体失效。改用「字母索引页 + 标题包含」实现搜索：
-        //   /kanmanhua/{a-z}.html 每页收录该拼音首字母下全部作品（约 700-740 条）
+        // 有关键词：站点 /cse1/search/ 实测 405、/cse/search/ 404，官方搜索接口失效。
+        // 改用「字母索引页 + 标题包含」：/kanmanhua/{a-z}.html 收录该拼音首字母全部作品。
         // 由关键词首字算出拼音首字母，只抓这一页，再在本地按标题过滤。
-        // 实测：「一人之下」-> y 页命中；「大奉打更人」-> d 页命中。
+        browsingCategory = false
         rankIndexForParse = -1
         searchKeyword = query.trim()
 
         val letter = pinyinInitial(query.trim().firstOrNull())
         val indexLetter = letter ?: "a"
-        // 记录实际使用的索引字母，解析时据此判断是否为搜索分支
         searchIndexLetter = indexLetter
         return GET("$baseUrl/kanmanhua/$indexLetter.html", siteHeaders)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
+        // Mihon 标准做法：request 阶段已把来源记入 browsingCategory / rankIndexForParse，
+        // parse 阶段据此分流，不依赖 URL 猜测。
+        if (!browsingCategory) {
+            // 榜单（单屏）：按选中序号取对应 div.allTop 块
+            val idx = if (rankIndexForParse >= 0) rankIndexForParse else 0
+            return MangasPage(parseRankBlock(parseBody(response), idx), false)
+        }
+
         val document = parseBody(response)
         val url = response.request.url.toString()
-
-        // 风云榜分支
-        if (url.contains("zaixian_hit.html")) {
-            val idx = if (rankIndexForParse >= 0) rankIndexForParse else 0
-            return MangasPage(parseRankBlock(document, idx), false)
-        }
 
         // 分类页 / 字母索引页共用同一套 DOM（div.dmList li）
         // 实测结构：<li><p class="fl cover"><a class="pic"><img src="封面"></a></p>
@@ -309,10 +317,9 @@ class LaiManHua : HttpSource() {
         // 封面与标题在不同分支，必须从整个 li 取，不能只取 dt a
         val lis = document.select("div.dmList li")
         if (lis.isNotEmpty()) {
-            // 是否为「字母索引搜索」分支：搜索词非空，且请求的正是该字母页
+            // 是否为「字母索引搜索」分支：搜索词非空
             val kw = searchKeyword
-            val isIndexSearch = kw.isNotBlank() &&
-                url.endsWith("/kanmanhua/$searchIndexLetter.html")
+            val isIndexSearch = kw.isNotBlank()
 
             val mangas = lis.mapNotNull { li ->
                 val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
@@ -331,16 +338,37 @@ class LaiManHua : HttpSource() {
                 manga
             }
 
-            // 字母索引页是单页全量，不翻页；分类页以站点「下一页」为准
-            val hasNext = if (isIndexSearch) {
-                false
-            } else {
-                document.select("div.pages a").any { it.text().contains("下一页") }
-            }
+            // 字母索引页是单页全量，不翻页
+            if (isIndexSearch) return MangasPage(mangas, false)
+
+            // 分类页：按原站 #pagerH 解析总页数，严格判断当前页之后是否还有内容。
+            // 站点在最后一页仍会渲染 pager（当前页变 <span>、无「下一页」链接），
+            // 因此不能只看「下一页」文本，必须结合请求页码与总页数。
+            val currentPage = Regex("/(\\d+)\\.html$").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            val totalPages = parseTotalPages(document)
+            val hasNext = currentPage < totalPages
             return MangasPage(mangas, hasNext)
         }
 
         return MangasPage(emptyList(), false)
+    }
+
+    /**
+     * 解析原站 #pagerH 分页条的总页数。
+     * 实测结构：<div id="pagerH"><a href="2.html">…<a href="270.html" class="last" title="尾页">
+     * 取所有分类页链接（形如 {N}.html）中的最大页码，即总页数。
+     * 若无 pager（如部分特殊页），返回 1（视为单页）。
+     */
+    private fun parseTotalPages(document: Document): Int {
+        val pager = document.selectFirst("div#pagerH")
+            ?: document.selectFirst("div.pages")
+            ?: return 1
+        var max = 1
+        for (a in pager.select("a[href]")) {
+            val n = Regex("(\\d+)\\.html$").find(a.attr("href"))?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            if (n > max) max = n
+        }
+        return max
     }
 
     /** 解析指定序号的风云榜容器（div.allTop，实测 15 个） */
@@ -361,21 +389,22 @@ class LaiManHua : HttpSource() {
     }
 
     override fun getFilterList(): FilterList = FilterList(
-        ModeFilter(),
-        Filter.Separator(),
-        Filter.Header("【风云榜】选择要查看的榜单"),
+        // Mihon 约定：表头仅作分组标题，不参与筛选。
+        // 「浏览视图」决定数据源（排行 / 分类），再由对应下拉在该视图内过滤。
+        Filter.Header("漫画排行 · 漫画分类"),
+        BrowseModeFilter(),
         RankFilter(),
-        Filter.Separator(),
-        Filter.Header("【分类浏览】选择分类，留空搜索框即可翻页"),
         CategoryFilter(),
     )
 
-    /** 浏览模式：风云榜 / 分类 */
-    private class ModeFilter : Filter.Select<String>("浏览模式", MODE_NAMES)
+    /** 浏览视图：排行（默认）/ 分类，决定 search 流程的数据源 */
+    private class BrowseModeFilter : Filter.Select<String>("浏览视图", MODE_NAMES)
 
-    private class RankFilter : Filter.Select<String>("风云榜榜单", RANK_NAMES)
+    /** 漫画排行：索引与原站 div.allTop 顺序严格一致 */
+    private class RankFilter : Filter.Select<String>("选择排行", RANK_NAMES)
 
-    private class CategoryFilter : Filter.Select<String>("漫画分类", CATEGORY_NAMES)
+    /** 漫画分类：仅在「分类」视图下生效，每页 30 条可翻页 */
+    private class CategoryFilter : Filter.Select<String>("选择分类", CATEGORY_NAMES)
 
     // ---------------------------------------------------------------- 工具
 
@@ -435,14 +464,15 @@ class LaiManHua : HttpSource() {
         )
 
         private const val MODE_RANK = 0
+        private const val MODE_CATEGORY = 1
 
-        private val MODE_NAMES = arrayOf("风云榜", "分类浏览")
+        private val MODE_NAMES = arrayOf("漫画排行", "漫画分类")
 
-        // 与 div.allTop 顺序严格一致（实测 15 个）
+        // 与原站 div.allTop 块内 h3 标题严格一致（实测 15 个，顺序一致）
         private val RANK_NAMES = arrayOf(
-            "所有漫画排行", "少年热血", "武侠格斗", "科幻魔幻", "竞技体育",
-            "爆笑喜剧", "侦探推理", "恐怖灵异", "耽美人生", "少女爱情",
-            "大陆漫画", "日韩漫画", "港台漫画", "欧美漫画", "日排行",
+            "所有漫画排行", "少年热血排行", "武侠格斗排行", "科幻魔幻排行", "竞技体育排行",
+            "爆笑喜剧排行", "侦探推理排行", "恐怖灵异排行", "耽美人生排行", "少女爱情排行",
+            "大陆漫画排行", "日韩漫画排行", "港台漫画排行", "欧美漫画排行", "日排行",
         )
 
         // 注：zaixian_lianzai / zaixian_wanjie 是单页入口，不支持 /{page}.html 分页，
@@ -498,6 +528,14 @@ class LaiManHua : HttpSource() {
     /** 记录本次榜单选择（仅在单次 search 流程内有效） */
     @Volatile
     private var rankIndexForParse: Int = 0
+
+    /**
+     * 标记本次 search 流程浏览的是「分类」（true，走分类页翻页）
+     * 还是「排行 / 搜索」（false，单屏或字母索引页）。
+     * Mihon 标准做法：request 阶段写入，parse 阶段读取同一标志分流。
+     */
+    @Volatile
+    private var browsingCategory: Boolean = false
 
     /** 记录本次搜索关键词，供 searchMangaParse 做本地标题过滤 */
     @Volatile
