@@ -88,7 +88,6 @@ class LaiManHua : HttpSource() {
         return SManga.create().apply {
             title = meta("og:title")
             author = meta("og:novel:author")
-            description = meta("og:description")
             thumbnail_url = meta("og:image").replace(Regex("@!\\d+x\\d+$"), "")
             genre = meta("og:novel:category")
             status = when {
@@ -96,8 +95,33 @@ class LaiManHua : HttpSource() {
                 meta("og:novel:status").contains("连载") -> SManga.ONGOING
                 else -> SManga.UNKNOWN
             }
+            description = buildString {
+                append(meta("og:description"))
+                val joinTime = extractInfoValue(document, "加入时间")
+                val updateTime = meta("og:novel:update_time")
+                if (joinTime.isNotEmpty() || updateTime.isNotEmpty()) {
+                    append("\n")
+                    if (updateTime.isNotEmpty()) append("\n更新时间：$updateTime")
+                    if (joinTime.isNotEmpty()) append("\n加入时间：$joinTime")
+                }
+            }
             initialized = true
         }
+    }
+
+    /** 从 .info 块按 <em> 标签文本提取对应值（如「加入时间」） */
+    private fun extractInfoValue(document: Document, label: String): String {
+        val info = document.selectFirst("div.info") ?: return ""
+        for (p in info.select("p")) {
+            val em = p.selectFirst("em") ?: continue
+            if (em.text().contains(label)) {
+                // 去掉 em 标签本身，剩下的文本即为值
+                val clone = p.clone()
+                clone.select("em").remove()
+                return clone.text().trim()
+            }
+        }
+        return ""
     }
 
     // ------------------------------------------------------- 章节
