@@ -162,7 +162,7 @@ jobs:
           REPO_URL_PLACEHOLDER
           ```
           RMEOF
-          sed -i "s|REPO_URL_PLACEHOLDER|https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPO_BRANCH}/index.min.json|" README.md
+          sed -i "s|REPO_URL_PLACEHOLDER|https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REPO_BRANCH}/index.pb|" README.md
           git add -A
           git commit -q -m "repo: build $(date -u +%Y%m%d-%H%M%S) v${VCODE}"
           git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$REPO_BRANCH"
