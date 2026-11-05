@@ -10,6 +10,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.Request
@@ -18,6 +19,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.io.IOException
 import java.nio.charset.Charset
+import java.util.concurrent.ConcurrentHashMap
 
 class LaiManHuaFactory : SourceFactory {
     override fun createSources() = listOf(LaiManHua())
@@ -40,6 +42,8 @@ class LaiManHua : HttpSource() {
 
     override val client = super.client.newBuilder()
         .addInterceptor(RefererInterceptor())
+        // 图片 CDN 较脆弱：限制单主机并发，避免连续下滑加载封面时瞬间请求过多被限制
+        .dispatcher(Dispatcher().apply { maxRequestsPerHost = 5 })
         .build()
 
     private val gb18030: Charset = Charset.forName("GB18030")
@@ -129,10 +133,19 @@ class LaiManHua : HttpSource() {
         val document = parseBody(response)
         val payload = extractPicTree(document, chapterUrl)
 
-        val raw: String = if (payload.contains("mh160tuku")) {
-            payload
-        } else {
-            String(Base64.decode(payload, Base64.DEFAULT), Charsets.UTF_8)
+        // 三层降级：明文含路径 -> Base64 解码 -> 正则从混淆串里提取路径
+        // 实测：页面首屏无 img、无 data-src，图路径全靠 picTree（明文或 Base64）解码而来。
+        val raw: String = when {
+            payload.contains("mh160tuku") -> payload
+            else -> {
+                try {
+                    String(Base64.decode(payload, Base64.DEFAULT), Charsets.UTF_8)
+                } catch (_: Exception) {
+                    // Base64 失败：当明文用正则提取所有章节图路径（形如 /mh160tuku/....jpg）
+                    Regex("/[A-Za-z0-9_/]+\\.(?:jpg|jpeg|png|webp)").findAll(payload)
+                        .joinToString("\$qingtiandy\$") { it.value }
+                }
+            }
         }
 
         val paths = raw.split("\$qingtiandy\$").filter { it.isNotBlank() }
@@ -288,7 +301,8 @@ class LaiManHua : HttpSource() {
 
         // 有关键词：站点 /cse1/search/ 实测 405、/cse/search/ 404，官方搜索接口失效。
         // 改用「字母索引页 + 标题包含」：/kanmanhua/{a-z}.html 收录该拼音首字母全部作品。
-        // 由关键词首字算出拼音首字母，只抓这一页，再在本地按标题过滤。
+        // 策略：首字拼音定位到对应字母页请求并解析；若无命中，后续页会遍历其余已缓存
+        // 字母页做跨字母模糊匹配，解决「搜中间词、首字母不同」的漏词问题。
         browsingCategory = false
         rankIndexForParse = -1
         searchKeyword = query.trim()
@@ -317,33 +331,48 @@ class LaiManHua : HttpSource() {
         // 封面与标题在不同分支，必须从整个 li 取，不能只取 dt a
         val lis = document.select("div.dmList li")
         if (lis.isNotEmpty()) {
-            // 是否为「字母索引搜索」分支：搜索词非空
             val kw = searchKeyword
-            val isIndexSearch = kw.isNotBlank()
+            // 字母索引搜索分支：关键词非空
+            if (kw.isNotBlank()) {
+                // 把当前字母页的全量条目写入缓存（字母 -> 全部标题/url/封面）
+                val currentLetter = searchIndexLetter
+                val all = lis.mapNotNull { li ->
+                    val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
+                    val title = a.attr("title").trim().ifEmpty { a.text().trim() }
+                    if (title.isBlank()) return@mapNotNull null
+                    Triple(title, stripDomain(a.attr("href")),
+                        normalizeThumb(li.selectFirst("p.cover img")?.attr("src").orEmpty()))
+                }
+                searchCache[currentLetter] = all
 
+                // 先在当前字母页内匹配
+                val primary = all.filter { it.first.contains(kw, ignoreCase = true) }
+                if (primary.isNotEmpty()) {
+                    return MangasPage(primary.map { toSearchManga(it) }, false)
+                }
+
+                // 首字母页无命中：遍历其余已缓存字母页做跨字母模糊匹配
+                val expanded = searchCache.entries
+                    .filter { it.key != currentLetter }
+                    .flatMap { it.value }
+                    .filter { it.first.contains(kw, ignoreCase = true) }
+                return MangasPage(expanded.map { toSearchManga(it) }, false)
+            }
+
+            // 分类页：按原站 #pagerH 解析总页数，严格判断当前页之后是否还有内容。
+            // 站点在最后一页仍会渲染 pager（当前页变 <span>、无「下一页」链接），
+            // 因此不能只看「下一页」文本，必须结合请求页码与总页数。
             val mangas = lis.mapNotNull { li ->
                 val a = li.selectFirst("dl dt a[href]") ?: return@mapNotNull null
                 val title = a.attr("title").trim().ifEmpty { a.text().trim() }
-                // 字母索引页含全站该首字母作品，必须在本地按关键词过滤
-                if (isIndexSearch && !title.contains(kw, ignoreCase = true)) {
-                    return@mapNotNull null
-                }
                 val manga = SManga.create()
                 manga.url = stripDomain(a.attr("href"))
                 manga.title = title
-                // 封面在 p.cover img 的 src；部分条目没有，此时留空由 Mihon 走详情页补
                 manga.thumbnail_url = normalizeThumb(
                     li.selectFirst("p.cover img")?.attr("src").orEmpty()
                 )
                 manga
             }
-
-            // 字母索引页是单页全量，不翻页
-            if (isIndexSearch) return MangasPage(mangas, false)
-
-            // 分类页：按原站 #pagerH 解析总页数，严格判断当前页之后是否还有内容。
-            // 站点在最后一页仍会渲染 pager（当前页变 <span>、无「下一页」链接），
-            // 因此不能只看「下一页」文本，必须结合请求页码与总页数。
             val currentPage = Regex("/(\\d+)\\.html$").find(url)?.groupValues?.get(1)?.toIntOrNull() ?: 1
             val totalPages = parseTotalPages(document)
             val hasNext = currentPage < totalPages
@@ -351,6 +380,15 @@ class LaiManHua : HttpSource() {
         }
 
         return MangasPage(emptyList(), false)
+    }
+
+    /** 把缓存的三元组转成 SManga */
+    private fun toSearchManga(item: Triple<String, String, String>): SManga {
+        val manga = SManga.create()
+        manga.title = item.first
+        manga.url = item.second
+        manga.thumbnail_url = item.third
+        return manga
     }
 
     /**
@@ -544,6 +582,14 @@ class LaiManHua : HttpSource() {
     /** 记录本次搜索定位到的字母索引（a-z），用于区分搜索分支与分类分支 */
     @Volatile
     private var searchIndexLetter: String = "a"
+
+    /**
+     * 字母索引页缓存：字母 -> 该字母下全量 (标题, 相对路径, 封面)。
+     * 用于跨字母模糊匹配，解决「搜中间词、首字母不同」的漏词问题。
+     * 仅缓存已请求过的字母页，不做 26 页全量预取，避免首次搜索耗时过长。
+     * 线程安全：search 在单次流程内串行，但用 ConcurrentHashMap 防御并发刷新。
+     */
+    private val searchCache = ConcurrentHashMap<String, List<Triple<String, String, String>>>()
 
     private class RefererInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
