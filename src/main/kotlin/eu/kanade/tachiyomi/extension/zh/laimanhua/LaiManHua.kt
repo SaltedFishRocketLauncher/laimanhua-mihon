@@ -42,6 +42,7 @@ class LaiManHua : HttpSource() {
 
     override val client = super.client.newBuilder()
         .addInterceptor(RefererInterceptor())
+        .addInterceptor(RetryInterceptor())
         // 图片 CDN 较脆弱：限制单主机并发，避免连续下滑加载封面时瞬间请求过多被限制
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 5 })
         .build()
@@ -627,6 +628,38 @@ class LaiManHua : HttpSource() {
                         .build(),
                 )
             }
+        }
+    }
+
+    /**
+     * 指数退避重试：仅对 GET 在服务端错误时重试。
+     *
+     * 说明：OkHttp 默认的 retryOnConnectionFailure 只重试连接层失败，不重试 HTTP 5xx；
+     * 这里补上 5xx（如 CDN 瞬时 503）。退避 1s、2s，最多重试 2 次，避免反复打脆弱 CDN。
+     * 故意排除 HEAD：resolveImageHost 用 HEAD 探测主机可用性，应快速失败切下一个主机，
+     * 若对 HEAD 也重试会每次探测多等 3s。非幂等请求（POST 等）同样不重试。
+     */
+    private class RetryInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val req = chain.request()
+            if (req.method != "GET") return chain.proceed(req)
+
+            var response = chain.proceed(req)
+            var attempt = 0
+            while (!response.isSuccessful && response.code >= 500 && attempt < MAX_RETRIES) {
+                // 先取到本次失败码，再关闭旧响应，最后退避重试
+                response.close()
+                Thread.sleep(BACKOFF_MS shl attempt) // 1s, 2s
+                attempt++
+                // 重试期间若连接失败，直接抛出（保持与常规网络失败一致的失败语义）
+                response = chain.proceed(req)
+            }
+            return response
+        }
+
+        companion object {
+            private const val MAX_RETRIES = 2
+            private const val BACKOFF_MS = 1000L
         }
     }
 }
