@@ -56,6 +56,8 @@ android {
 dependencies {
     // 修正：keiyoushi/extensions-lib 在 jitpack 上仅有 1.4.2.1，原 1.5.4 不存在(404)
     compileOnly 'com.github.keiyoushi:extensions-lib:1.4.2.1'
+    // fetchChapterList 覆写需要 rx.Observable，运行时由 Mihon 提供
+    compileOnly 'io.reactivex:rxjava:1.3.8'
     compileOnly 'com.squareup.okhttp3:okhttp:4.12.0'
     compileOnly 'org.jsoup:jsoup:1.17.2'
 }

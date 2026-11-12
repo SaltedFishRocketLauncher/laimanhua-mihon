@@ -17,6 +17,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import rx.Observable
 import java.io.IOException
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
@@ -65,7 +66,10 @@ class LaiManHua : HttpSource() {
 
     // ------------------------------------------------------------ 解码
 
-    private fun parseBody(response: Response): Document {
+    private fun parseBody(response: Response): Document =
+        Jsoup.parse(readHtml(response), response.request.url.toString())
+
+    private fun readHtml(response: Response): String {
         val url = response.request.url.toString()
         if (!response.isSuccessful) {
             if (response.code == 403) {
@@ -79,7 +83,7 @@ class LaiManHua : HttpSource() {
             }
             throw Exception("HTTP ${response.code} @ $url")
         }
-        return Jsoup.parse(response.body!!.bytes().toString(gb18030), url)
+        return response.body!!.bytes().toString(gb18030)
     }
 
     // ------------------------------------------------------- 详情
@@ -87,15 +91,23 @@ class LaiManHua : HttpSource() {
     override fun mangaDetailsRequest(manga: SManga): Request =
         GET(baseUrl + manga.url, siteHeaders)
 
-    override fun mangaDetailsParse(response: Response): SManga {
-        val document = parseBody(response)
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> = Observable.fromCallable {
+        val url = baseUrl + manga.url
+        parseDetails(Jsoup.parse(fetchHtml(url), url)).apply { initialized = true }
+    }
+
+    override fun mangaDetailsParse(response: Response): SManga = parseDetails(parseBody(response))
+
+    private fun parseDetails(document: Document): SManga {
         fun meta(p: String): String =
             document.selectFirst("meta[property=\"$p\"]")?.attr("content")?.trim().orEmpty()
 
         return SManga.create().apply {
             title = meta("og:title")
             author = meta("og:novel:author")
-            thumbnail_url = meta("og:image").replace(Regex("@!\\d+x\\d+$"), "")
+            // 保留 @!180x240：与列表页封面 URL 完全一致，Coil 可直接命中磁盘缓存；
+            // 去掉后缀会变成另一张原图 URL（约 90-150KB），等于重复下载。
+            thumbnail_url = normalizeThumb(meta("og:image"))
             genre = meta("og:novel:category")
             status = when {
                 meta("og:novel:status").contains("完结") -> SManga.COMPLETED
@@ -136,8 +148,19 @@ class LaiManHua : HttpSource() {
     override fun chapterListRequest(manga: SManga): Request =
         GET(baseUrl + manga.url, siteHeaders)
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = parseBody(response)
+    /**
+     * Mihon 的 getMangaUpdate 会并发拉取详情与章节列表，而两者是同一个 URL。
+     * fetchHtml 按 URL 做单飞 + 30s 短缓存，两个并发调用只下载一次，避免 2 倍流量互抢。
+     */
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
+        val url = baseUrl + manga.url
+        parseChapters(Jsoup.parse(fetchHtml(url), url), url)
+    }
+
+    override fun chapterListParse(response: Response): List<SChapter> =
+        parseChapters(parseBody(response), response.request.url.toString())
+
+    private fun parseChapters(document: Document, url: String): List<SChapter> {
         val anchors = document.select("div.plist li > a[href]").ifEmpty {
             document.select("#chapterList li a")
         }
@@ -156,7 +179,6 @@ class LaiManHua : HttpSource() {
         // 提取章节链接。要求路径形如 /kanmanhua/{slug}/{数字}.html，其中末段必须是纯数字，
         // 以此排除分类分页（如 /kanmanhua/rexue/1.html，末段也是数字但分类名是已知的
         // zaixian_* / 分类拼音，不会同时满足「未知 slug + 数字章号」），避免误收导航链接。
-        val url = response.request.url.toString()
         val html = document.outerHtml()
         val regex = Regex("href=\"(/kanmanhua/[\\w\\-]+/(\\d+)\\.html)\"")
         val seen = LinkedHashSet<String>()
@@ -573,6 +595,10 @@ class LaiManHua : HttpSource() {
         // 分类分页末段是个位/十位小数字。>=100 可干净区分两者。
         private const val CHAPTER_ID_MIN = 100L
 
+        // 详情/章节同一 URL 的单飞缓存：只覆盖打开漫画这一轮
+        private const val HTML_CACHE_TTL_MS = 30_000L
+        private const val HTML_CACHE_MAX = 4
+
         // 图片主机探测结果缓存：10 分钟内不重复 HEAD
         private const val IMAGE_HOST_TTL_MS = 10 * 60 * 1000L
 
@@ -669,6 +695,34 @@ class LaiManHua : HttpSource() {
 
     @Volatile
     private var cachedImageHostAt: Long = 0L
+
+    /**
+     * 单飞：详情与章节列表在 Mihon 里是并发请求同一个 URL，合并成一次下载。
+     * 30s 短缓存只覆盖「打开漫画」这一轮，避免长期持有过期章节。
+     */
+    private val htmlLocks = ConcurrentHashMap<String, Any>()
+    private val htmlCache = ConcurrentHashMap<String, Pair<Long, String>>()
+
+    private fun fetchHtml(url: String): String {
+        val key = url.trimEnd('/')
+        val existing = htmlLocks[key]
+        val lock = existing ?: run {
+            val newLock = Any()
+            htmlLocks.putIfAbsent(key, newLock) ?: newLock
+        }
+        synchronized(lock) {
+            val cached = htmlCache[key]
+            if (cached != null && System.currentTimeMillis() - cached.first < HTML_CACHE_TTL_MS) {
+                return cached.second
+            }
+            val html = client.newCall(GET(url, siteHeaders)).execute().use { readHtml(it) }
+            htmlCache[key] = System.currentTimeMillis() to html
+            if (htmlCache.size > HTML_CACHE_MAX) {
+                htmlCache.keys.firstOrNull { it != key }?.let { htmlCache.remove(it) }
+            }
+            return html
+        }
+    }
 
     private class RefererInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
