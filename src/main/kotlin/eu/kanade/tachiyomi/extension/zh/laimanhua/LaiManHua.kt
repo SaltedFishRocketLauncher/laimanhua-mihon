@@ -20,6 +20,7 @@ import org.jsoup.nodes.Document
 import java.io.IOException
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 class LaiManHuaFactory : SourceFactory {
     override fun createSources() = listOf(LaiManHua())
@@ -43,6 +44,11 @@ class LaiManHua : HttpSource() {
     override val client = super.client.newBuilder()
         .addInterceptor(RefererInterceptor())
         .addInterceptor(RetryInterceptor())
+        // 显式超时：源站 TTFB 实测可达 10s，默认 readTimeout 10s 会擦边失败；
+        // 代理环境下握手更慢，留出余量但不要无限等待。
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         // 图片 CDN 较脆弱：限制单主机并发，避免连续下滑加载封面时瞬间请求过多被限制
         .dispatcher(Dispatcher().apply { maxRequestsPerHost = 5 })
         .build()
@@ -210,6 +216,12 @@ class LaiManHua : HttpSource() {
     override fun imageUrlParse(response: Response): String = ""
 
     private fun resolveImageHost(chapterUrl: String, firstPath: String): String {
+        // 探测一次即可：同一会话内主机不会频繁切换，避免每开一章都做 1-3 次 HEAD
+        val cached = cachedImageHost
+        if (cached != null && System.currentTimeMillis() - cachedImageHostAt < IMAGE_HOST_TTL_MS) {
+            return cached
+        }
+
         for (host in IMAGE_HOSTS) {
             try {
                 val req = Request.Builder()
@@ -219,7 +231,11 @@ class LaiManHua : HttpSource() {
                     .header("User-Agent", ua)
                     .build()
                 client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) return host
+                    if (resp.isSuccessful) {
+                        cachedImageHost = host
+                        cachedImageHostAt = System.currentTimeMillis()
+                        return host
+                    }
                 }
             } catch (_: IOException) {
                 // next host
@@ -557,6 +573,9 @@ class LaiManHua : HttpSource() {
         // 分类分页末段是个位/十位小数字。>=100 可干净区分两者。
         private const val CHAPTER_ID_MIN = 100L
 
+        // 图片主机探测结果缓存：10 分钟内不重复 HEAD
+        private const val IMAGE_HOST_TTL_MS = 10 * 60 * 1000L
+
         private val MODE_NAMES = arrayOf("漫画排行", "漫画分类")
 
         // 与原站 div.allTop 块内 h3 标题严格一致（实测 15 个，顺序一致）
@@ -644,6 +663,13 @@ class LaiManHua : HttpSource() {
      */
     private val searchCache = ConcurrentHashMap<String, List<Triple<String, String, String>>>()
 
+    /** 已探测可用的图片主机及探测时间 */
+    @Volatile
+    private var cachedImageHost: String? = null
+
+    @Volatile
+    private var cachedImageHostAt: Long = 0L
+
     private class RefererInterceptor : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
             val req = chain.request()
@@ -672,12 +698,18 @@ class LaiManHua : HttpSource() {
             val req = chain.request()
             if (req.method != "GET") return chain.proceed(req)
 
+            // 页面请求值得多等一会儿；图片请求要走就快走，别把 dispatcher 槽位睡死。
+            // 原来的 1s/2s 退避对所有 GET 生效，图片一多会把同主机并发全部占住。
+            val isPage = req.url.host.endsWith("laimanhua88.com")
+            val maxRetries = if (isPage) PAGE_MAX_RETRIES else IMAGE_MAX_RETRIES
+            val baseDelay = if (isPage) PAGE_BACKOFF_MS else IMAGE_BACKOFF_MS
+
             var response = chain.proceed(req)
             var attempt = 0
-            while (!response.isSuccessful && response.code >= 500 && attempt < MAX_RETRIES) {
-                // 先取到本次失败码，再关闭旧响应，最后退避重试
+            while (!response.isSuccessful && response.code >= 500 && attempt < maxRetries) {
+                // 先关闭旧响应，再退避重试
                 response.close()
-                Thread.sleep(BACKOFF_MS shl attempt) // 1s, 2s
+                Thread.sleep(baseDelay shl attempt)
                 attempt++
                 // 重试期间若连接失败，直接抛出（保持与常规网络失败一致的失败语义）
                 response = chain.proceed(req)
@@ -686,8 +718,10 @@ class LaiManHua : HttpSource() {
         }
 
         companion object {
-            private const val MAX_RETRIES = 2
-            private const val BACKOFF_MS = 1000L
+            private const val PAGE_MAX_RETRIES = 2
+            private const val PAGE_BACKOFF_MS = 800L
+            private const val IMAGE_MAX_RETRIES = 1
+            private const val IMAGE_BACKOFF_MS = 250L
         }
     }
 }
