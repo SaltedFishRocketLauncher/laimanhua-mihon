@@ -20,6 +20,8 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import rx.Observable
 import java.io.IOException
+import java.net.URI
+import java.net.URISyntaxException
 import java.nio.charset.Charset
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -81,10 +83,13 @@ class LaiManHua : HttpSource() {
      * 官方 `headers` 是 `by lazy { headersBuilder().build() }`，覆写后所有请求
      * 默认带上站点 Referer 与 UA，调用处不必逐个显式传参——少一处漏传就少一次
      * 静默 403。
+     *
+     * 注意必须用 set 而非 add：super 里已有一个默认 User-Agent，用 add 会变成
+     * 两个 User-Agent 头，部分 WAF/CDN 会视为异常请求直接返回 400。
      */
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
-        .add("Referer", siteReferer)
-        .add("User-Agent", ua)
+        .set("Referer", siteReferer)
+        .set("User-Agent", ua)
 
     // ------------------------------------------------------------ 解码
 
@@ -556,9 +561,29 @@ class LaiManHua : HttpSource() {
 
     // ---------------------------------------------------------------- 工具
 
-    /** 去掉域名只留路径，HttpSource 会自行拼 baseUrl */
-    private fun stripDomain(href: String): String =
-        if (href.startsWith("http")) href.removePrefix(baseUrl) else href
+    /**
+     * 去掉域名只留路径，HttpSource 会自行拼 baseUrl。
+     *
+     * 必须稳健：若 href 是绝对 URL 但域名与 baseUrl 不一致（缺 www、http 协议、
+     * 站点换域名等），直接 removePrefix 会静默失败并返回完整 URL，拼上 baseUrl 后
+     * 变成 `https://www.xxx.comhttps://yyy.com/...` 这种畸形地址，站点直接 400。
+     * 这里按 URI 解析取 path，任何绝对 URL 都能正确降级为相对路径。
+     */
+    private fun stripDomain(href: String): String {
+        val raw = href.trim()
+        if (raw.isEmpty()) return raw
+        if (!raw.startsWith("http")) return raw
+        return try {
+            val uri = URI(raw.replace(" ", "%20"))
+            buildString {
+                append(uri.path ?: return raw)
+                uri.query?.let { append('?').append(it) }
+                uri.fragment?.let { append('#').append(it) }
+            }
+        } catch (_: URISyntaxException) {
+            raw
+        }
+    }
 
     /**
      * 统一处理封面地址。
